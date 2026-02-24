@@ -1,0 +1,15 @@
+[package]
+name = "mlua-probe-core"
+version = "0.1.0"
+description = "Core debug engine for mlua — breakpoints, stepping, variable inspection"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+mlua = { workspace = true }
+thiserror = "2"
