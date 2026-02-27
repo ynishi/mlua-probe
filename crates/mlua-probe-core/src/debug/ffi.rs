@@ -15,6 +15,285 @@ use std::os::raw::c_int;
 
 use super::types::Variable;
 
+// ─── Lua 5.4 internal struct bindings (NOT public API) ───
+//
+// These `#[repr(C)]` definitions mirror the vendored Lua 5.4.8
+// source (lua-src-550.0.0).  They are used **only** to recover
+// the names of for-loop control variables that `lua_getlocal`
+// reports as `(temporary)` because the variable's debug scope
+// (`startpc..endpc`) does not cover the FORLOOP instruction.
+//
+// !! If the vendored Lua version changes, these layouts MUST be
+// !! verified against the new source.
+
+/// `LocVar` — lobject.h:525
+#[repr(C)]
+struct LocVar {
+    varname: *mut TString,
+    startpc: c_int,
+    endpc: c_int,
+}
+
+/// Minimal `TString` header — lobject.h:385-396
+///
+/// Layout: CommonHeader (next, tt, marked) + extra + shrlen + hash + union u + contents[1]
+/// We only need `shrlen` and `contents` to read the string.
+#[repr(C)]
+struct TString {
+    next: *mut std::ffi::c_void, // GCObject *next
+    tt: u8,                      // lu_byte tt
+    marked: u8,                  // lu_byte marked
+    extra: u8,                   // lu_byte extra
+    shrlen: u8,                  // lu_byte shrlen (0xFF for long strings)
+    hash: u32,                   // unsigned int hash
+    u: usize,                    // union { size_t lnglen; TString *hnext; }
+                                 // contents[1] follows — accessed via pointer arithmetic
+}
+
+impl TString {
+    /// Read the string contents as a `&str`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must point to a valid, live `TString` allocated by Lua.
+    unsafe fn as_str(&self) -> Option<&str> {
+        let len = if self.shrlen != 0xFF {
+            self.shrlen as usize
+        } else {
+            self.u // lnglen
+        };
+        if len == 0 {
+            return Some("");
+        }
+        // `contents` is a flexible array member starting at offset
+        // `&self.u as *const _ + size_of::<usize>()` — but it's
+        // actually declared as `char contents[1]` right after the `u`
+        // union in the C struct.  We use the field offset.
+        let contents_ptr = std::ptr::addr_of!(self.u)
+            .cast::<u8>()
+            .add(std::mem::size_of::<usize>());
+        let bytes = std::slice::from_raw_parts(contents_ptr, len);
+        std::str::from_utf8(bytes).ok()
+    }
+}
+
+/// Minimal `Proto` — lobject.h:550-573
+///
+/// We only need `code`, `locvars`, and `sizelocvars`.
+/// Fields before those are included to maintain correct offsets.
+#[repr(C)]
+struct Proto {
+    // CommonHeader
+    next: *mut std::ffi::c_void,
+    tt: u8,
+    marked: u8,
+    // Proto fields
+    numparams: u8,
+    is_vararg: u8,
+    maxstacksize: u8,
+    _pad: [u8; 0], // alignment may insert padding; see note below
+    sizeupvalues: c_int,
+    sizek: c_int,
+    sizecode: c_int,
+    sizelineinfo: c_int,
+    sizep: c_int,
+    sizelocvars: c_int,
+    sizeabslineinfo: c_int,
+    linedefined: c_int,
+    lastlinedefined: c_int,
+    k: *mut std::ffi::c_void,           // TValue *k
+    code: *mut u32,                     // Instruction *code
+    p: *mut *mut Proto,                 // Proto **p
+    upvalues: *mut std::ffi::c_void,    // Upvaldesc *upvalues
+    lineinfo: *mut i8,                  // ls_byte *lineinfo
+    abslineinfo: *mut std::ffi::c_void, // AbsLineInfo *abslineinfo
+    locvars: *mut LocVar,               // LocVar *locvars
+    source: *mut std::ffi::c_void,      // TString *source
+    gclist: *mut std::ffi::c_void,      // GCObject *gclist
+}
+
+/// Minimal `LClosure` — lobject.h:654-658
+///
+/// Layout: ClosureHeader (CommonHeader + nupvalues + gclist) + Proto *p
+#[repr(C)]
+struct LClosure {
+    // CommonHeader
+    next: *mut std::ffi::c_void,
+    tt: u8,
+    marked: u8,
+    // ClosureHeader additions
+    nupvalues: u8,
+    _pad: [u8; 0],
+    gclist: *mut std::ffi::c_void,
+    // LClosure-specific
+    p: *mut Proto,
+    // UpVal *upvals[1] follows — we don't need it
+}
+
+/// Minimal `CallInfo` — lstate.h:177-204
+///
+/// We only need `func` (StkIdRel) and `u.l.savedpc`.
+/// On 64-bit systems `StkIdRel` is just a pointer (`StackValue *`).
+#[repr(C)]
+struct CallInfo {
+    func: *mut std::ffi::c_void, // StkIdRel func
+    top: *mut std::ffi::c_void,  // StkIdRel top
+    previous: *mut CallInfo,
+    next_ci: *mut CallInfo,
+    // union u — we access the Lua branch (u.l)
+    savedpc: *const u32, // u.l.savedpc (Instruction *)
+    trap: i32,           // u.l.trap (l_signalT = sig_atomic_t)
+    nextraargs: c_int,   // u.l.nextraargs
+                         // u2 union follows but we don't need it
+}
+
+/// Mirror of `ffi::lua_Debug` with `i_ci` exposed as public.
+///
+/// mlua-sys declares `i_ci` as private.  Since the struct is
+/// `#[repr(C)]`, we can safely transmute a pointer to read it.
+#[repr(C)]
+struct LuaDebugExt {
+    pub event: c_int,
+    pub name: *const std::os::raw::c_char,
+    pub namewhat: *const std::os::raw::c_char,
+    pub what: *const std::os::raw::c_char,
+    pub source: *const std::os::raw::c_char,
+    pub srclen: usize,
+    pub currentline: c_int,
+    pub linedefined: c_int,
+    pub lastlinedefined: c_int,
+    pub nups: u8,
+    pub nparams: u8,
+    pub isvararg: std::os::raw::c_char,
+    pub istailcall: std::os::raw::c_char,
+    pub ftransfer: u16,
+    pub ntransfer: u16,
+    pub short_src: [std::os::raw::c_char; 60], // LUA_IDSIZE = 60
+    pub i_ci: *mut std::ffi::c_void,
+}
+
+/// Recover the real name for a `(temporary)` local variable slot.
+///
+/// When `lua_getlocal` returns `(temporary)` for slot `n`, the
+/// variable's value is still in the register but Lua considers
+/// it out of scope.  This function walks `Proto.locvars` to find
+/// the original variable name for that register slot.
+///
+/// Returns `None` if the name cannot be recovered (e.g. true
+/// temporary, or internal variable).
+///
+/// # Safety
+///
+/// `state` must be valid.  `ar` must have been populated by
+/// `lua_getstack`.  Must be called on the VM thread.
+unsafe fn recover_varname(
+    state: *mut ffi::lua_State,
+    ar: &ffi::lua_Debug,
+    slot: c_int,
+) -> Option<String> {
+    unsafe {
+        // 1. Get CallInfo from lua_Debug.i_ci.
+        //    mlua-sys declares i_ci as private, so we cast through
+        //    our mirror struct with identical layout.
+        let ar_ext = (ar as *const ffi::lua_Debug).cast::<LuaDebugExt>();
+        let ci = (*ar_ext).i_ci as *const CallInfo;
+        if ci.is_null() {
+            return None;
+        }
+
+        // 2. Push the function via lua_getinfo("f") to get LClosure pointer
+        let mut ar2: ffi::lua_Debug = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(ar, &mut ar2, 1);
+        if ffi::lua_getinfo(state, c"f".as_ptr(), &mut ar2) == 0 {
+            return None;
+        }
+        // lua_topointer gives us the GCObject* which IS the LClosure*
+        let closure_ptr = ffi::lua_topointer(state, -1) as *const LClosure;
+        ffi::lua_pop(state, 1); // pop the function
+
+        if closure_ptr.is_null() {
+            return None;
+        }
+
+        let proto = (*closure_ptr).p;
+        if proto.is_null() {
+            return None;
+        }
+
+        // 3. Compute currentpc = savedpc - proto.code - 1
+        let savedpc = (*ci).savedpc;
+        let code = (*proto).code;
+        if savedpc.is_null() || code.is_null() {
+            return None;
+        }
+        let currentpc = (savedpc.offset_from(code) as c_int) - 1;
+
+        // 4. Walk locvars to find the variable whose register matches
+        //    `slot - 1` (0-based) and whose scope doesn't cover currentpc.
+        let sizelocvars = (*proto).sizelocvars;
+        let locvars = (*proto).locvars;
+        if locvars.is_null() || sizelocvars <= 0 {
+            return None;
+        }
+
+        // Build register mapping: for each locvar[k], determine its
+        // 1-based slot number by counting how many locvars are active
+        // at locvar[k].startpc (including k itself).
+        //
+        // This replicates the logic in luaF_getlocalname: the n-th
+        // active variable at a given PC occupies register n-1.
+        let register_for = |k: c_int| -> c_int {
+            let target_pc = (*locvars.offset(k as isize)).startpc;
+            let mut count: c_int = 0;
+            for j in 0..=k {
+                let lv = &*locvars.offset(j as isize);
+                if lv.startpc <= target_pc && target_pc < lv.endpc {
+                    count += 1;
+                }
+            }
+            count // 1-based slot
+        };
+
+        // Search for the locvar that:
+        // a) maps to the given slot
+        // b) is NOT active at currentpc (out of scope)
+        // c) has a real name (not starting with '(')
+        for k in 0..sizelocvars {
+            let lv = &*locvars.offset(k as isize);
+
+            // Skip if currently in scope (lua_getlocal would have
+            // returned the real name already).
+            if lv.startpc <= currentpc && currentpc < lv.endpc {
+                continue;
+            }
+
+            // Skip if this locvar hasn't been reached yet
+            if currentpc < lv.startpc {
+                continue;
+            }
+
+            // Check if this locvar's register matches our slot
+            if register_for(k) != slot {
+                continue;
+            }
+
+            // Read the variable name from TString
+            let varname_ts = lv.varname as *const TString;
+            if varname_ts.is_null() {
+                continue;
+            }
+            if let Some(name) = (*varname_ts).as_str() {
+                // Skip internal names like "(for state)"
+                if !name.starts_with('(') {
+                    return Some(name.to_string());
+                }
+            }
+        }
+
+        None
+    }
+}
+
 /// Collect local variables at the given stack `level`.
 ///
 /// Level 0 is the currently executing function inside the hook.
@@ -54,14 +333,24 @@ pub(crate) unsafe fn get_locals(state: *mut ffi::lua_State, level: c_int) -> Vec
             // SAFETY: name_ptr is a valid C string from the Lua runtime.
             let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
 
-            let var = read_stack_top(state, &name);
-
-            // SAFETY: lua_getlocal pushed one value; pop it.
-            ffi::lua_pop(state, 1);
-
-            // Names starting with '(' are internal (e.g. "(for state)").
-            if !name.starts_with('(') {
+            if name == "(temporary)" {
+                // Out-of-scope variable (e.g. for-loop control var at
+                // FORLOOP instruction).  Try to recover the real name.
+                if let Some(real_name) = recover_varname(state, &ar, n) {
+                    let var = read_stack_top(state, &real_name);
+                    ffi::lua_pop(state, 1);
+                    vars.push(var);
+                } else {
+                    ffi::lua_pop(state, 1);
+                }
+            } else if !name.starts_with('(') {
+                // Normal in-scope variable.
+                let var = read_stack_top(state, &name);
+                ffi::lua_pop(state, 1);
                 vars.push(var);
+            } else {
+                // Internal variable like "(for state)" — skip.
+                ffi::lua_pop(state, 1);
             }
 
             n = match n.checked_add(1) {
@@ -266,7 +555,22 @@ unsafe fn build_frame_env(state: *mut ffi::lua_State, level: c_int) {
                         break;
                     }
                     let name = CStr::from_ptr(name_ptr);
-                    if name.to_bytes().starts_with(b"(") {
+                    let name_bytes = name.to_bytes();
+
+                    if name_bytes == b"(temporary)" {
+                        // Out-of-scope variable — recover real name.
+                        if let Some(real_name) = recover_varname(state, &ar2, n) {
+                            let cname = std::ffi::CString::new(real_name).ok();
+                            if let Some(cname) = cname {
+                                // Value is on top; setfield pops it.
+                                ffi::lua_setfield(state, env_idx, cname.as_ptr());
+                            } else {
+                                ffi::lua_pop(state, 1);
+                            }
+                        } else {
+                            ffi::lua_pop(state, 1);
+                        }
+                    } else if name_bytes.starts_with(b"(") {
                         // Internal variable (e.g. "(for state)") — skip.
                         ffi::lua_pop(state, 1);
                     } else {
@@ -496,6 +800,224 @@ mod tests {
         assert!(
             locals.iter().any(|v| v.name == "x" && v.value == "42"),
             "expected local x=42, got: {locals:?}"
+        );
+    }
+
+    /// Test that `get_locals` returns the for-loop control variable `i`
+    /// at the FORLOOP instruction (line hit #2).
+    #[test]
+    fn get_locals_recovers_for_loop_var() {
+        let lua = Lua::new();
+
+        let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_clone = hit_count.clone();
+        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let diag_clone = diag.clone();
+        let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected_clone = collected.clone();
+
+        lua.set_hook(mlua::HookTriggers::EVERY_LINE, move |lua, debug| {
+            if debug.current_line() == Some(2) {
+                let n = hit_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 1 {
+                    // 2nd hit on line 2 = FORLOOP instruction
+                    let state = lua.exec_raw_lua(|raw| raw.state());
+                    let mut d = String::new();
+
+                    for level in 0..5 {
+                        // SAFETY: In hook callback on VM thread.
+                        let locals = unsafe { get_locals(state, level) };
+                        d.push_str(&format!(
+                            "level={level} locals={:?}\n",
+                            locals
+                                .iter()
+                                .map(|v| format!("{}={}", v.name, v.value))
+                                .collect::<Vec<_>>()
+                        ));
+                        if locals.iter().any(|v| v.name == "sum") {
+                            *collected_clone.lock().unwrap() = locals;
+                            break;
+                        }
+                    }
+
+                    // Also dump raw lua_getlocal results at each slot
+                    for level in 0..5 {
+                        unsafe {
+                            let mut ar: ffi::lua_Debug = std::mem::zeroed();
+                            if ffi::lua_getstack(state, level, &mut ar) == 0 {
+                                continue;
+                            }
+                            let check = ffi::lua_getlocal(state, &ar, 1);
+                            if check.is_null() {
+                                continue;
+                            }
+                            let cname = CStr::from_ptr(check).to_string_lossy().into_owned();
+                            ffi::lua_pop(state, 1);
+                            if cname != "sum" {
+                                continue;
+                            }
+
+                            d.push_str(&format!("raw slots at level={level}:\n"));
+                            for slot in 1..=10 {
+                                let name_ptr = ffi::lua_getlocal(state, &ar, slot);
+                                if name_ptr.is_null() {
+                                    d.push_str(&format!("  slot {slot}: NULL\n"));
+                                    break;
+                                }
+                                let sname = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+                                let val = stack_top_to_display(state);
+                                ffi::lua_pop(state, 1);
+                                d.push_str(&format!("  slot {slot}: name={sname:?} val={val}\n"));
+                            }
+                            break;
+                        }
+                    }
+
+                    *diag_clone.lock().unwrap() = d;
+                }
+            }
+            Ok(mlua::VmState::Continue)
+        })
+        .unwrap();
+
+        lua.load("local sum = 0\nfor i = 1, 10 do\nsum = sum + i\nend")
+            .set_name("@fortest.lua")
+            .exec()
+            .unwrap();
+
+        let d = diag.lock().unwrap();
+        eprintln!("=== DIAG ===\n{d}");
+
+        let locals = collected.lock().unwrap();
+        eprintln!(
+            "=== COLLECTED ===\n{:?}",
+            locals
+                .iter()
+                .map(|v| format!("{}={}", v.name, v.value))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            locals.iter().any(|v| v.name == "i"),
+            "get_locals should recover for-loop variable 'i', got: {:?}",
+            locals.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Test evaluate_condition at FORLOOP can access the for-loop variable.
+    #[test]
+    fn evaluate_condition_at_forloop() {
+        let lua = Lua::new();
+
+        let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_clone = hit_count.clone();
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let results_clone = results.clone();
+
+        lua.set_hook(mlua::HookTriggers::EVERY_LINE, move |lua, debug| {
+            if debug.current_line() == Some(2) {
+                let n = hit_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n >= 1 {
+                    // FORLOOP hits (n=1 is i=1, n=2 is i=2, etc.)
+                    let cond_result = lua.exec_raw_lua(|raw| unsafe {
+                        evaluate_condition(raw.state(), "i == 3", 0)
+                    });
+                    let i_val = lua.exec_raw_lua(|raw| unsafe {
+                        evaluate_with_frame_env(raw.state(), "return i", 0)
+                    });
+                    results_clone.lock().unwrap().push((n, cond_result, i_val));
+                }
+            }
+            Ok(mlua::VmState::Continue)
+        })
+        .unwrap();
+
+        lua.load("local sum = 0\nfor i = 1, 10 do\nsum = sum + i\nend")
+            .set_name("@fortest.lua")
+            .exec()
+            .unwrap();
+
+        let r = results.lock().unwrap();
+        eprintln!("=== CONDITION RESULTS ===");
+        for (n, cond, val) in r.iter() {
+            eprintln!("  hit={n} cond(i==3)={cond} eval(i)={val:?}");
+        }
+
+        // At hit n=3 (i=3), the condition should be true
+        assert!(
+            r.iter().any(|(_, cond, _)| *cond),
+            "condition 'i == 3' should be true at some iteration"
+        );
+        // Verify i is evaluable
+        assert!(
+            r.iter().all(|(_, _, val)| val.is_ok()),
+            "evaluating 'i' should succeed at all FORLOOP hits"
+        );
+    }
+
+    /// Same test but calling get_locals INSIDE exec_raw_lua (mimics MCP path).
+    #[test]
+    fn get_locals_inside_exec_raw_lua() {
+        let lua = Lua::new();
+
+        let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_clone = hit_count.clone();
+        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let diag_clone = diag.clone();
+        let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected_clone = collected.clone();
+
+        lua.set_hook(mlua::HookTriggers::EVERY_LINE, move |lua, debug| {
+            if debug.current_line() == Some(2) {
+                let n = hit_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 1 {
+                    // Call get_locals INSIDE exec_raw_lua (MCP path)
+                    let mut d = String::new();
+
+                    for level in 0..5i32 {
+                        let locals =
+                            lua.exec_raw_lua(|raw| unsafe { get_locals(raw.state(), level) });
+                        d.push_str(&format!(
+                            "level={level} locals={:?}\n",
+                            locals
+                                .iter()
+                                .map(|v| format!("{}={}", v.name, v.value))
+                                .collect::<Vec<_>>()
+                        ));
+                        if locals.iter().any(|v| v.name == "sum") {
+                            *collected_clone.lock().unwrap() = locals;
+                            break;
+                        }
+                    }
+
+                    *diag_clone.lock().unwrap() = d;
+                }
+            }
+            Ok(mlua::VmState::Continue)
+        })
+        .unwrap();
+
+        lua.load("local sum = 0\nfor i = 1, 10 do\nsum = sum + i\nend")
+            .set_name("@fortest.lua")
+            .exec()
+            .unwrap();
+
+        let d = diag.lock().unwrap();
+        eprintln!("=== INSIDE exec_raw_lua ===\n{d}");
+
+        let locals = collected.lock().unwrap();
+        eprintln!(
+            "=== COLLECTED ===\n{:?}",
+            locals
+                .iter()
+                .map(|v| format!("{}={}", v.name, v.value))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            locals.iter().any(|v| v.name == "i"),
+            "get_locals inside exec_raw_lua should recover 'i', got: {:?}",
+            locals.iter().map(|v| &v.name).collect::<Vec<_>>()
         );
     }
 }

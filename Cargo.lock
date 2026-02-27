@@ -399,10 +399,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlua-lspec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d36934bb39ec9e9d7070a65d00de39d5ba68e590f0d09b15f997dd9ef3748b80"
+dependencies = [
+ "mlua",
+]
+
+[[package]]
 name = "mlua-probe-core"
 version = "0.1.0"
 dependencies = [
  "mlua",
+ "mlua-lspec",
  "thiserror",
 ]
 

@@ -61,7 +61,7 @@ pub struct EvaluateParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TestLaunchParams {
-    /// Lua test code using the lust framework (describe/it/expect).
+    /// Lua test code using the mlua-lspec framework (describe/it/expect).
     /// The `lust` global is pre-loaded automatically.
     pub code: String,
     /// Chunk name for error messages (default: "@test.lua").
@@ -486,7 +486,7 @@ impl DebugMcpHandler {
 
     // ── Testing ─────────────────────────────────────────────────
 
-    /// Run Lua test code with the lust test framework pre-loaded.
+    /// Run Lua test code with the mlua-lspec test framework pre-loaded.
     /// Returns structured test results (passed/failed counts and
     /// per-test details).
     ///
@@ -549,7 +549,7 @@ impl ServerHandler for DebugMcpHandler {
                  Provides breakpoints, stepping, variable inspection, expression \
                  evaluation, and a built-in test framework for Lua code running in an mlua VM.\n\n\
                  Debugging: Start with debug_launch, then use wait_event to receive pause events.\n\n\
-                 Testing: Use test_launch to run Lua tests with the lust framework \
+                 Testing: Use test_launch to run Lua tests with the mlua-lspec framework \
                  (describe/it/expect/spy). Returns structured JSON results.\n\n\
                  SECURITY: debug_launch, evaluate, and test_launch execute arbitrary Lua code \
                  with full standard library access (including os and io modules). \

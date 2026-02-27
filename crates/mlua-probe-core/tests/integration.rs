@@ -1167,3 +1167,58 @@ local z = 3
 
     handle.join().unwrap().unwrap();
 }
+
+// ──────────────────────────────────────────────
+// 25. Conditional breakpoint on for-loop header
+// ──────────────────────────────────────────────
+
+/// Verifies that a conditional breakpoint on a for-loop header line
+/// can access the loop control variable (which Lua 5.4 reports as
+/// `(temporary)` at the FORLOOP instruction).
+#[test]
+fn conditional_breakpoint_for_loop_variable() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local sum = 0
+for i = 1, 10 do
+  sum = sum + i
+end
+"#;
+
+    // BP on line 3 (for header) — condition references `i`.
+    ctrl.set_breakpoint("@forloop.lua", 3, Some("i == 5"))
+        .unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@forloop.lua");
+
+    let evt = wait_paused_timeout(&ctrl, Duration::from_secs(5));
+    match &evt {
+        Some(DebugEvent::Paused {
+            reason: PauseReason::Breakpoint(_),
+            ..
+        }) => {
+            // Check that locals include `i` with value 5
+            let locals = ctrl.get_locals(0).unwrap();
+            eprintln!(
+                "locals: {:?}",
+                locals
+                    .iter()
+                    .map(|v| format!("{}={}", v.name, v.value))
+                    .collect::<Vec<_>>()
+            );
+            let i_var = locals.iter().find(|v| v.name == "i");
+            assert!(
+                i_var.is_some(),
+                "locals should contain 'i', got: {:?}",
+                locals.iter().map(|v| &v.name).collect::<Vec<_>>()
+            );
+            assert_eq!(i_var.unwrap().value, "5", "i should be 5 when BP fires");
+        }
+        other => panic!("expected Paused(Breakpoint) for 'i == 5', got: {other:?}"),
+    }
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}

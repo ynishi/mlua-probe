@@ -5,9 +5,8 @@
 //!
 //! - **Debugging** — breakpoints, stepping, variable inspection, and
 //!   expression evaluation via [`DebugSession`] / [`DebugController`].
-//! - **Testing** — a built-in [lust](https://github.com/bjornbytes/lust)-based
-//!   test framework with structured result collection via the
-//!   [`testing`] module.
+//! - **Testing** — BDD test framework via [`mlua_lspec`], re-exported
+//!   as the [`testing`] module.
 //!
 //! # Architecture
 //!
@@ -77,7 +76,17 @@
 //! ```
 
 mod debug;
-pub mod testing;
+
+/// BDD test framework for Lua, re-exported from [`mlua_lspec`].
+pub mod testing {
+    pub use mlua_lspec::{TestResult, TestSummary};
+
+    pub mod framework {
+        pub use mlua_lspec::{collect_results, register, run_tests};
+    }
+
+    pub use mlua_lspec::doubles;
+}
 
 pub use debug::breakpoint::Breakpoint;
 pub use debug::controller::DebugController;
