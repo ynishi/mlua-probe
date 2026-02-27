@@ -555,6 +555,182 @@ fn doubles_reset_preserves_return_values() {
     assert_eq!(summary.failed, 0);
 }
 
+// ── Comparison assertions ───────────────────────────────────────
+
+#[test]
+fn comparison_gt() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('gt', function()
+            it('passes when greater', function()
+                expect(10).to.be.gt(5)
+            end)
+            it('fails when equal', function()
+                local ok, err = pcall(function() expect(5).to.be.gt(5) end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('greater than')
+            end)
+            it('fails when less', function()
+                local ok = pcall(function() expect(3).to.be.gt(5) end)
+                expect(ok).to.equal(false)
+            end)
+            it('negation works', function()
+                expect(3).to_not.be.gt(5)
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 4);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn comparison_gte() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('gte', function()
+            it('passes when greater', function()
+                expect(10).to.be.gte(5)
+            end)
+            it('passes when equal', function()
+                expect(5).to.be.gte(5)
+            end)
+            it('fails when less', function()
+                local ok, err = pcall(function() expect(3).to.be.gte(5) end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('greater than or equal')
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 3);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn comparison_lt() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('lt', function()
+            it('passes when less', function()
+                expect(3).to.be.lt(5)
+            end)
+            it('fails when equal', function()
+                local ok = pcall(function() expect(5).to.be.lt(5) end)
+                expect(ok).to.equal(false)
+            end)
+            it('fails when greater', function()
+                local ok, err = pcall(function() expect(10).to.be.lt(5) end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('less than')
+            end)
+            it('negation works', function()
+                expect(10).to_not.be.lt(5)
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 4);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn comparison_lte() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('lte', function()
+            it('passes when less', function()
+                expect(3).to.be.lte(5)
+            end)
+            it('passes when equal', function()
+                expect(5).to.be.lte(5)
+            end)
+            it('fails when greater', function()
+                local ok, err = pcall(function() expect(10).to.be.lte(5) end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('less than or equal')
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 3);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn have_key_assertion() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('have_key', function()
+            it('passes when key exists', function()
+                expect({name = "alice", age = 30}).to.have_key("name")
+            end)
+            it('fails when key missing', function()
+                local ok, err = pcall(function()
+                    expect({name = "alice"}).to.have_key("email")
+                end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('key')
+            end)
+            it('works with numeric keys', function()
+                expect({10, 20, 30}).to.have_key(1)
+            end)
+            it('negation works', function()
+                expect({name = "alice"}).to_not.have_key("email")
+            end)
+            it('errors on non-table', function()
+                local ok = pcall(function() expect("string").to.have_key("x") end)
+                expect(ok).to.equal(false)
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 5);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn have_length_assertion() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('have_length', function()
+            it('passes for matching table length', function()
+                expect({1, 2, 3}).to.have_length(3)
+            end)
+            it('passes for matching string length', function()
+                expect("hello").to.have_length(5)
+            end)
+            it('fails for wrong length', function()
+                local ok, err = pcall(function()
+                    expect({1, 2}).to.have_length(5)
+                end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('length')
+            end)
+            it('negation works', function()
+                expect({1, 2, 3}).to_not.have_length(5)
+            end)
+            it('shows actual and expected in error', function()
+                local ok, err = pcall(function()
+                    expect({1}).to.have_length(3)
+                end)
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match('1')
+                expect(tostring(err)).to.match('3')
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 5);
+    assert_eq!(summary.failed, 0);
+}
+
 // ── Register on existing Lua VM ─────────────────────────────────
 
 #[test]

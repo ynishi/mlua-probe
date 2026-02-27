@@ -150,15 +150,43 @@ end
 
 local paths = {
   [''] = { 'to', 'to_not' },
-  to = { 'have', 'equal', 'be', 'exist', 'fail', 'match' },
-  to_not = { 'have', 'equal', 'be', 'exist', 'fail', 'match', chain = function(a) a.negate = not a.negate end },
+  to = { 'have', 'equal', 'be', 'exist', 'fail', 'match', 'have_key', 'have_length' },
+  to_not = { 'have', 'equal', 'be', 'exist', 'fail', 'match', 'have_key', 'have_length', chain = function(a) a.negate = not a.negate end },
   a = { test = isa },
   an = { test = isa },
-  be = { 'a', 'an', 'truthy',
+  be = { 'a', 'an', 'truthy', 'gt', 'gte', 'lt', 'lte',
     test = function(v, x)
       return v == x,
         'expected ' .. tostring(v) .. ' and ' .. tostring(x) .. ' to be the same',
         'expected ' .. tostring(v) .. ' and ' .. tostring(x) .. ' to not be the same'
+    end
+  },
+  gt = {
+    test = function(v, x)
+      return v > x,
+        'expected ' .. tostring(v) .. ' to be greater than ' .. tostring(x),
+        'expected ' .. tostring(v) .. ' to not be greater than ' .. tostring(x)
+    end
+  },
+  gte = {
+    test = function(v, x)
+      return v >= x,
+        'expected ' .. tostring(v) .. ' to be greater than or equal to ' .. tostring(x),
+        'expected ' .. tostring(v) .. ' to not be greater than or equal to ' .. tostring(x)
+    end
+  },
+  lt = {
+    test = function(v, x)
+      return v < x,
+        'expected ' .. tostring(v) .. ' to be less than ' .. tostring(x),
+        'expected ' .. tostring(v) .. ' to not be less than ' .. tostring(x)
+    end
+  },
+  lte = {
+    test = function(v, x)
+      return v <= x,
+        'expected ' .. tostring(v) .. ' to be less than or equal to ' .. tostring(x),
+        'expected ' .. tostring(v) .. ' to not be less than or equal to ' .. tostring(x)
     end
   },
   exist = {
@@ -223,6 +251,24 @@ local paths = {
       return result ~= nil,
         'expected ' .. v .. ' to match pattern [[' .. p .. ']]',
         'expected ' .. v .. ' to not match pattern [[' .. p .. ']]'
+    end
+  },
+  have_key = {
+    test = function(v, k)
+      if type(v) ~= 'table' then
+        error('expected a table, got ' .. type(v), 2)
+      end
+      return v[k] ~= nil,
+        'expected table to have key ' .. tostring(k),
+        'expected table to not have key ' .. tostring(k)
+    end
+  },
+  have_length = {
+    test = function(v, expected)
+      local actual = #v
+      return actual == expected,
+        'expected length ' .. tostring(expected) .. ', got ' .. tostring(actual),
+        'expected length to not be ' .. tostring(expected)
     end
   }
 }
