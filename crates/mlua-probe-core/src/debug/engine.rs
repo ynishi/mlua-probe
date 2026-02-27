@@ -375,38 +375,52 @@ fn hook_callback(lua: &Lua, debug: &mlua::Debug<'_>, inner: &SessionInner) -> Lu
                 let step_pauses = stepping::step_triggers(&step_mode, call_depth);
 
                 // Breakpoint check with condition evaluation.
-                // Extract condition before dropping the lock — evaluation
-                // may trigger line events that re-enter this hook.
+                // Extract ID + condition, then drop the lock before
+                // evaluating (evaluation fires line events that
+                // re-enter this hook).
                 let bp_registry = inner.breakpoints.lock().map_err(poison_to_lua)?;
-                let bp_fires = match bp_registry.find(source_name, line) {
-                    Some(bp) if bp.enabled => {
-                        let condition = bp.condition.clone();
-                        drop(bp_registry);
-                        match condition {
-                            Some(cond) => {
-                                inner.evaluating_condition.store(true, Ordering::Release);
-                                // SAFETY: We are on the VM thread inside
-                                // the hook.  Level 0 = the function that
-                                // triggered the line event.
-                                let result = lua.exec_raw_lua(|raw| unsafe {
-                                    super::ffi::evaluate_condition(raw.state(), &cond, 0)
-                                });
-                                inner.evaluating_condition.store(false, Ordering::Release);
-                                result
-                            }
-                            None => true,
+                let bp_info = bp_registry
+                    .find(source_name, line)
+                    .filter(|bp| bp.enabled)
+                    .map(|bp| (bp.id, bp.condition.clone()));
+                drop(bp_registry);
+
+                let bp_hit_id = match bp_info {
+                    Some((id, Some(cond))) => {
+                        inner.evaluating_condition.store(true, Ordering::Release);
+                        // SAFETY: We are on the VM thread inside
+                        // the hook.  Level 0 = the function that
+                        // triggered the line event.
+                        let result = lua.exec_raw_lua(|raw| unsafe {
+                            super::ffi::evaluate_condition(raw.state(), &cond, 0)
+                        });
+                        inner.evaluating_condition.store(false, Ordering::Release);
+                        if result {
+                            Some(id)
+                        } else {
+                            None
                         }
                     }
-                    _ => {
-                        drop(bp_registry);
-                        false
-                    }
+                    Some((id, None)) => Some(id),
+                    None => None,
                 };
 
-                let should_pause = stop_entry || user_pause || step_pauses || bp_fires;
+                // Determine pause reason with priority:
+                // Breakpoint > Step > UserPause > Entry.
+                let reason = if let Some(id) = bp_hit_id {
+                    Some(PauseReason::Breakpoint(id))
+                } else if step_pauses {
+                    Some(PauseReason::Step)
+                } else if user_pause {
+                    Some(PauseReason::UserPause)
+                } else if stop_entry {
+                    Some(PauseReason::Entry)
+                } else {
+                    None
+                };
 
-                if should_pause {
-                    enter_paused_loop(lua, inner, source_name, line, user_pause)?;
+                if let Some(reason) = reason {
+                    enter_paused_loop(lua, inner, reason)?;
                 }
             }
         }
@@ -445,32 +459,7 @@ fn terminate(inner: &SessionInner, result: Option<String>, error: Option<String>
     }
 }
 
-fn enter_paused_loop(
-    lua: &Lua,
-    inner: &SessionInner,
-    source: &str,
-    line: usize,
-    user_pause: bool,
-) -> LuaResult<()> {
-    // Determine pause reason (breakpoint > step > user_pause > entry).
-    //
-    // Lock ordering: breakpoints is acquired and released before
-    // step_mode to uphold the documented invariant that they are
-    // never held simultaneously.
-    let bp_id = {
-        let registry = inner.breakpoints.lock().map_err(poison_to_lua)?;
-        registry.find(source, line).map(|bp| bp.id)
-    };
-    let reason = if let Some(id) = bp_id {
-        PauseReason::Breakpoint(id)
-    } else if inner.step_mode.lock().map_err(poison_to_lua)?.is_some() {
-        PauseReason::Step
-    } else if user_pause {
-        PauseReason::UserPause
-    } else {
-        PauseReason::Entry
-    };
-
+fn enter_paused_loop(lua: &Lua, inner: &SessionInner, reason: PauseReason) -> LuaResult<()> {
     // Clear step mode when we actually pause.
     *inner.step_mode.lock().map_err(poison_to_lua)? = None;
     inner.has_step_mode.store(false, Ordering::Release);
