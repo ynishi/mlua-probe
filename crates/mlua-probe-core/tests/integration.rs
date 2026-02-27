@@ -907,3 +907,263 @@ inner()
     ctrl.continue_execution().unwrap();
     handle.join().unwrap().unwrap();
 }
+
+// ──────────────────────────────────────────────
+// 20. Conditional breakpoint — fires only when true
+// ──────────────────────────────────────────────
+
+/// Verifies that a conditional breakpoint only pauses when the
+/// condition expression evaluates to a truthy value.
+#[test]
+fn conditional_breakpoint_fires_only_when_true() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local result = 0
+for i = 1, 20 do
+    result = result + i
+end
+return result
+"#;
+
+    // Conditional BP on line 4 — should only fire when i == 10.
+    ctrl.set_breakpoint("@cond.lua", 4, Some("i == 10"))
+        .unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@cond.lua");
+
+    // Should receive exactly one Paused event (when i == 10).
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should hit conditional bp");
+    let stack = match &evt {
+        DebugEvent::Paused { reason, stack } => {
+            assert!(
+                matches!(reason, PauseReason::Breakpoint(_)),
+                "expected Breakpoint reason, got: {reason:?}"
+            );
+            stack
+        }
+        other => panic!("expected Paused, got: {other:?}"),
+    };
+
+    // Verify `i` is 10 at the paused frame.
+    let frame = stack
+        .iter()
+        .find(|f| f.source.contains("cond.lua"))
+        .expect("stack should contain cond.lua frame");
+    let locals = ctrl.get_locals(frame.id).unwrap();
+    let i_val = locals
+        .iter()
+        .find(|v| v.name == "i")
+        .map(|v| v.value.as_str());
+    assert_eq!(i_val, Some("10"), "i should be 10 when condition fires");
+
+    // Continue — the loop finishes without hitting the condition again
+    // (i == 10 only matches once in a for loop from 1 to 20).
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 20b. Conditional breakpoint set AFTER entry pause (MCP flow)
+// ──────────────────────────────────────────────
+
+/// Reproduces the MCP flow: stop_on_entry → set conditional BP while
+/// paused → continue.  This differs from test #20 where the BP is set
+/// before code starts.
+#[test]
+fn conditional_breakpoint_set_after_entry_pause() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.set_stop_on_entry(true);
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local result = 0
+for i = 1, 20 do
+    result = result + i
+end
+return result
+"#;
+
+    let handle = spawn_lua(lua.clone(), code, "@cond_mcp.lua");
+
+    // Wait for entry pause.
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should stop on entry");
+    assert!(matches!(
+        evt,
+        DebugEvent::Paused {
+            reason: PauseReason::Entry,
+            ..
+        }
+    ));
+
+    // Set conditional breakpoint WHILE paused (MCP flow).
+    ctrl.set_breakpoint("@cond_mcp.lua", 4, Some("i == 10"))
+        .unwrap();
+
+    // Continue execution.
+    ctrl.continue_execution().unwrap();
+
+    // Should pause exactly when i == 10.
+    let evt2 =
+        wait_paused_timeout(&ctrl, Duration::from_secs(5)).expect("should hit conditional bp");
+    let stack = match &evt2 {
+        DebugEvent::Paused { reason, stack } => {
+            assert!(
+                matches!(reason, PauseReason::Breakpoint(_)),
+                "expected Breakpoint reason, got: {reason:?}"
+            );
+            stack
+        }
+        other => panic!("expected Paused, got: {other:?}"),
+    };
+
+    let frame = stack
+        .iter()
+        .find(|f| f.source.contains("cond_mcp.lua"))
+        .expect("stack should contain cond_mcp.lua frame");
+    let locals = ctrl.get_locals(frame.id).unwrap();
+    let i_val = locals
+        .iter()
+        .find(|v| v.name == "i")
+        .map(|v| v.value.as_str());
+    assert_eq!(
+        i_val,
+        Some("10"),
+        "i should be 10 when condition fires (MCP flow)"
+    );
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 21. Conditional breakpoint with syntax error is skipped
+// ──────────────────────────────────────────────
+
+/// A breakpoint whose condition has a syntax error should be treated
+/// as "condition false" — the VM continues without pausing.
+#[test]
+fn conditional_breakpoint_bad_syntax_skipped() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.set_stop_on_entry(true);
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local x = 1
+local y = 2
+local z = 3
+"#;
+
+    // BP with invalid syntax on line 3.
+    ctrl.set_breakpoint("@badsyntax.lua", 3, Some("if then end"))
+        .unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@badsyntax.lua");
+
+    // First event should be stop-on-entry (line 2).
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should stop on entry");
+    assert!(matches!(
+        evt,
+        DebugEvent::Paused {
+            reason: PauseReason::Entry,
+            ..
+        }
+    ));
+
+    // Continue — the bad-syntax BP on line 3 should NOT fire.
+    ctrl.continue_execution().unwrap();
+
+    // The script should complete without another pause.
+    // Any event we receive should be Continued or Terminated,
+    // never a Paused/Breakpoint.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match wait_event_timeout(&ctrl, remaining) {
+            Some(DebugEvent::Paused { reason, .. }) => {
+                panic!("bad-syntax breakpoint should not fire, got: {reason:?}");
+            }
+            Some(DebugEvent::Continued) | Some(DebugEvent::Output { .. }) => continue,
+            Some(DebugEvent::Terminated { .. }) | None => break,
+        }
+    }
+
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 22. Conditional breakpoint accesses local variables
+// ──────────────────────────────────────────────
+
+/// Verifies that breakpoint conditions can reference local variables
+/// that are in scope at the breakpoint line.
+#[test]
+fn conditional_breakpoint_accesses_locals() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local name = "alice"
+local marker = name
+local done = true
+"#;
+
+    // BP on line 3 — condition references local `name`.
+    ctrl.set_breakpoint("@condlocal.lua", 3, Some("name == 'alice'"))
+        .unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@condlocal.lua");
+
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5))
+        .expect("condition referencing local should fire");
+    assert!(matches!(
+        evt,
+        DebugEvent::Paused {
+            reason: PauseReason::Breakpoint(_),
+            ..
+        }
+    ));
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 23. Conditional breakpoint — false condition never pauses
+// ──────────────────────────────────────────────
+
+/// Verifies that a breakpoint whose condition is always false never
+/// causes a pause, even though the line is executed.
+#[test]
+fn conditional_breakpoint_always_false_never_pauses() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local x = 1
+local y = 2
+local z = 3
+"#;
+
+    // BP on line 3 with always-false condition.
+    ctrl.set_breakpoint("@nofire.lua", 3, Some("false"))
+        .unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@nofire.lua");
+
+    // The script should complete without any Paused event.
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(2));
+    match evt {
+        Some(DebugEvent::Paused { reason, .. }) => {
+            panic!("always-false condition should not fire, got: {reason:?}");
+        }
+        _ => { /* Terminated, Continued, or timeout — all acceptable */ }
+    }
+
+    handle.join().unwrap().unwrap();
+}

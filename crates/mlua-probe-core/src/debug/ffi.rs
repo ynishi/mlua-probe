@@ -370,6 +370,72 @@ pub(crate) unsafe fn evaluate_with_frame_env(
     }
 }
 
+/// Evaluate a breakpoint condition in the scope of a specific stack frame.
+///
+/// Returns `true` if the condition evaluates to a truthy value (not `nil`,
+/// not `false`).  Returns `false` on any error (syntax, runtime) or if the
+/// result is falsy — a failing condition silently skips the breakpoint
+/// rather than disrupting execution.
+///
+/// Uses [`build_frame_env`] to give the condition access to locals,
+/// upvalues, and globals.
+///
+/// # Stack effect
+///
+/// Net zero — all pushed values are cleaned up.
+///
+/// # Safety
+///
+/// Same contract as [`get_locals`].
+pub(crate) unsafe fn evaluate_condition(
+    state: *mut ffi::lua_State,
+    condition: &str,
+    level: c_int,
+) -> bool {
+    unsafe {
+        let top = ffi::lua_gettop(state);
+
+        // 1. Build env table with locals + upvalues.
+        build_frame_env(state, level);
+        let env_idx = ffi::lua_gettop(state);
+
+        // 2. Compile condition as "return <condition>".
+        let code = format!("return {condition}");
+        let ret = ffi::luaL_loadbufferx(
+            state,
+            code.as_ptr().cast(),
+            code.len(),
+            c"=condition".as_ptr(),
+            std::ptr::null(),
+        );
+        if ret != ffi::LUA_OK {
+            ffi::lua_settop(state, top);
+            return false;
+        }
+        let func_idx = ffi::lua_gettop(state);
+
+        // 3. Set _ENV as the first upvalue of the compiled chunk.
+        ffi::lua_pushvalue(state, env_idx);
+        let upname = ffi::lua_setupvalue(state, func_idx, 1);
+        if upname.is_null() {
+            ffi::lua_settop(state, top);
+            return false;
+        }
+
+        // 4. Execute (0 args, 1 result).
+        let call_ret = ffi::lua_pcallk(state, 0, 1, 0, 0, None);
+        if call_ret != ffi::LUA_OK {
+            ffi::lua_settop(state, top);
+            return false;
+        }
+
+        // 5. Check truthiness (not nil and not false).
+        let is_truthy = ffi::lua_toboolean(state, -1) != 0;
+        ffi::lua_settop(state, top);
+        is_truthy
+    }
+}
+
 /// Read the value at the top of the stack as an error string.
 ///
 /// # Safety

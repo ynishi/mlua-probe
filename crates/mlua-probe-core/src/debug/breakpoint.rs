@@ -50,9 +50,10 @@ impl BreakpointRegistry {
     /// Add or replace a breakpoint at `(source, line)`.
     /// Returns the assigned breakpoint ID.
     ///
-    /// **Phase 1 limitation:** `condition` is stored but **not evaluated**
-    /// by the stepping engine.  All breakpoints fire unconditionally.
-    /// Condition evaluation is planned for Phase 2.
+    /// When `condition` is `Some`, the breakpoint only fires when the
+    /// Lua expression evaluates to a truthy value.  Condition evaluation
+    /// is performed by the hook callback in [`engine`](super::engine)
+    /// via [`ffi::evaluate_condition`](super::ffi::evaluate_condition).
     ///
     /// # Errors
     ///

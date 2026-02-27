@@ -105,6 +105,12 @@ pub(crate) struct SessionInner {
     /// Shared with [`DebugController`](super::controller::DebugController)
     /// which updates the flag after add/remove operations.
     pub has_active_breakpoints: Arc<AtomicBool>,
+    /// Re-entrancy guard: `true` while evaluating a breakpoint condition.
+    ///
+    /// Prevents the hook from firing again (via `lua_pcallk` inside the
+    /// condition evaluation) and potentially deadlocking or pausing
+    /// inside the condition code.
+    pub evaluating_condition: AtomicBool,
 }
 
 impl DebugSession {
@@ -135,6 +141,7 @@ impl DebugSession {
             pause_requested: pause_requested.clone(),
             has_step_mode: AtomicBool::new(false),
             has_active_breakpoints: has_active_breakpoints.clone(),
+            evaluating_condition: AtomicBool::new(false),
         });
 
         let controller = DebugController::new(
@@ -328,6 +335,14 @@ fn hook_callback(lua: &Lua, debug: &mlua::Debug<'_>, inner: &SessionInner) -> Lu
                 return Ok(VmState::Continue);
             }
 
+            // Re-entrancy guard: skip the hook while evaluating a
+            // breakpoint condition.  lua_pcallk inside evaluate_condition
+            // fires line events for the condition code — without this
+            // guard we'd deadlock or pause inside the condition.
+            if inner.evaluating_condition.load(Ordering::Acquire) {
+                return Ok(VmState::Continue);
+            }
+
             // Check stop-on-entry (lock-free via AtomicBool).
             // compare_exchange: if first_line_seen is false, set to true
             // and check stop_on_entry.  Subsequent calls see true and skip.
@@ -355,17 +370,40 @@ fn hook_callback(lua: &Lua, debug: &mlua::Debug<'_>, inner: &SessionInner) -> Lu
 
                 let call_depth = inner.call_depth.load(Ordering::Relaxed);
                 let step_mode = inner.step_mode.lock().map_err(poison_to_lua)?.clone();
+
+                // Step mode check (pure logic, no Lua interaction).
+                let step_pauses = stepping::step_triggers(&step_mode, call_depth);
+
+                // Breakpoint check with condition evaluation.
+                // Extract condition before dropping the lock — evaluation
+                // may trigger line events that re-enter this hook.
                 let bp_registry = inner.breakpoints.lock().map_err(poison_to_lua)?;
-                let should_pause = stop_entry
-                    || user_pause
-                    || stepping::should_pause(
-                        &step_mode,
-                        &bp_registry,
-                        source_name,
-                        line,
-                        call_depth,
-                    );
-                drop(bp_registry);
+                let bp_fires = match bp_registry.find(source_name, line) {
+                    Some(bp) if bp.enabled => {
+                        let condition = bp.condition.clone();
+                        drop(bp_registry);
+                        match condition {
+                            Some(cond) => {
+                                inner.evaluating_condition.store(true, Ordering::Release);
+                                // SAFETY: We are on the VM thread inside
+                                // the hook.  Level 0 = the function that
+                                // triggered the line event.
+                                let result = lua.exec_raw_lua(|raw| unsafe {
+                                    super::ffi::evaluate_condition(raw.state(), &cond, 0)
+                                });
+                                inner.evaluating_condition.store(false, Ordering::Release);
+                                result
+                            }
+                            None => true,
+                        }
+                    }
+                    _ => {
+                        drop(bp_registry);
+                        false
+                    }
+                };
+
+                let should_pause = stop_entry || user_pause || step_pauses || bp_fires;
 
                 if should_pause {
                     enter_paused_loop(lua, inner, source_name, line, user_pause)?;
