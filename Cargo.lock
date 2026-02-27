@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "mlua-probe-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mlua",
  "mlua-lspec",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "mlua-probe-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "mlua",

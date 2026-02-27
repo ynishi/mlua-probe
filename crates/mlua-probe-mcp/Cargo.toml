@@ -1,6 +1,6 @@
 [package]
 name = "mlua-probe-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ name = "mlua-probe-mcp"
 path = "src/main.rs"
 
 [dependencies]
-mlua-probe-core = { version = "0.1.0", path = "../mlua-probe-core" }
+mlua-probe-core = { version = "0.1.1", path = "../mlua-probe-core" }
 mlua = { workspace = true }
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
