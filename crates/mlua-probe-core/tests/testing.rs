@@ -501,6 +501,60 @@ fn doubles_call_args_out_of_bounds() {
     assert_eq!(summary.failed, 0);
 }
 
+// ── test_doubles: revert on non-spy_on spy ──────────────────────
+
+#[test]
+fn doubles_revert_on_plain_spy_is_noop() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('revert on plain spy', function()
+            it('does nothing and does not error', function()
+                local s = test_doubles.spy(function() return 1 end)
+                s:revert()
+                -- spy still works after revert
+                expect(s()).to.equal(1)
+                expect(s:call_count()).to.equal(1)
+            end)
+            it('does nothing on stub', function()
+                local st = test_doubles.stub()
+                st:returns(99)
+                st:revert()
+                expect(st()).to.equal(99)
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 2);
+    assert_eq!(summary.failed, 0);
+}
+
+// ── test_doubles: reset preserves return_values ─────────────────
+
+#[test]
+fn doubles_reset_preserves_return_values() {
+    let summary = run(r#"
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('reset after returns', function()
+            it('clears call history but keeps stub value', function()
+                local s = test_doubles.spy(function() return "original" end)
+                s:returns("stubbed")
+                s(1)
+                s(2)
+                expect(s:call_count()).to.equal(2)
+                s:reset()
+                expect(s:call_count()).to.equal(0)
+                -- return_values should still be active
+                expect(s()).to.equal("stubbed")
+            end)
+        end)
+    "#);
+
+    assert_eq!(summary.passed, 1);
+    assert_eq!(summary.failed, 0);
+}
+
 // ── Register on existing Lua VM ─────────────────────────────────
 
 #[test]

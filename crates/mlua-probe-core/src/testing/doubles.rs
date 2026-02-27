@@ -31,6 +31,14 @@ use mlua::prelude::*;
 
 /// Compare two Lua values for equality (primitive types only).
 ///
+/// Uses exact comparison semantics consistent with Lua 5.4's `==`
+/// operator and the lust framework's `eq()` helper (which defaults
+/// to `eps = 0`).
+///
+/// For Integer↔Number cross-type comparison, a round-trip check
+/// guards against precision loss when `i64` values exceed 2^53
+/// (the limit of exact integer representation in `f64`).
+///
 /// Tables, functions, and userdata are compared by identity
 /// (always `false` here — use `call_args()` for complex assertions).
 fn values_match(a: &LuaValue, b: &LuaValue) -> bool {
@@ -39,9 +47,15 @@ fn values_match(a: &LuaValue, b: &LuaValue) -> bool {
         (Nil, Nil) => true,
         (Boolean(a), Boolean(b)) => a == b,
         (Integer(a), Integer(b)) => a == b,
-        (Number(a), Number(b)) => (a - b).abs() < f64::EPSILON,
-        (Integer(a), Number(b)) => (*a as f64 - b).abs() < f64::EPSILON,
-        (Number(a), Integer(b)) => (a - *b as f64).abs() < f64::EPSILON,
+        (Number(a), Number(b)) => a == b,
+        (Integer(a), Number(b)) => {
+            let f = *a as f64;
+            f == *b && f as i64 == *a
+        }
+        (Number(a), Integer(b)) => {
+            let f = *b as f64;
+            *a == f && *a as i64 == *b
+        }
         (String(a), String(b)) => a.as_bytes() == b.as_bytes(),
         _ => false,
     }
@@ -104,11 +118,12 @@ impl LuaDouble {
     }
 
     fn new_table_spy(original: LuaFunction, target: LuaTable, key: String) -> Self {
+        let call_fn = original.clone();
         Self {
             state: Arc::new(Mutex::new(DoubleState {
                 calls: Vec::new(),
                 return_values: None,
-                original: Some(original.clone()),
+                original: Some(call_fn),
                 call_through: true,
                 revert_info: Some(RevertInfo {
                     target,
@@ -207,6 +222,12 @@ impl LuaUserData for LuaDouble {
             Ok(())
         });
 
+        // Clear recorded call history.
+        //
+        // Only resets `calls`; `return_values` set via `returns()` are
+        // preserved.  This mirrors common test-double conventions
+        // (e.g. Sinon.js `resetHistory`) where resetting history and
+        // resetting behaviour are separate operations.
         methods.add_method("reset", |_, this, ()| {
             let mut state = this.lock()?;
             state.calls.clear();

@@ -33,7 +33,7 @@ pub fn collect_results(lua: &Lua) -> LuaResult<TestSummary> {
     for pair in tests_table.pairs::<usize, LuaTable>() {
         let (_, t) = pair?;
         tests.push(TestResult {
-            suite: t.get::<String>("suite").unwrap_or_default(),
+            suite: t.get::<String>("suite")?,
             name: t.get::<String>("name")?,
             passed: t.get::<bool>("passed")?,
             error: t.get::<Option<String>>("error")?,
