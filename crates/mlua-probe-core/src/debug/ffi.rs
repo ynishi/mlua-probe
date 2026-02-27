@@ -91,7 +91,8 @@ struct Proto {
     numparams: u8,
     is_vararg: u8,
     maxstacksize: u8,
-    _pad: [u8; 0], // alignment may insert padding; see note below
+    // Note: #[repr(C)] inserts 3 bytes of padding here automatically
+    // (maxstacksize is u8 at offset 12; sizeupvalues needs 4-byte alignment at offset 16).
     sizeupvalues: c_int,
     sizek: c_int,
     sizecode: c_int,
@@ -134,17 +135,23 @@ struct LClosure {
 ///
 /// We only need `func` (StkIdRel) and `u.l.savedpc`.
 /// On 64-bit systems `StkIdRel` is just a pointer (`StackValue *`).
+///
+/// The C `union u` is 24 bytes (max of Lua branch 16B and C-function
+/// branch 24B).  We model the Lua branch fields we access and pad to
+/// the full union size so that `u2` sits at the correct offset.
 #[repr(C)]
 struct CallInfo {
     func: *mut std::ffi::c_void, // StkIdRel func
     top: *mut std::ffi::c_void,  // StkIdRel top
     previous: *mut CallInfo,
     next_ci: *mut CallInfo,
-    // union u — we access the Lua branch (u.l)
+    // union u — Lua branch (u.l): 16 bytes used, 8 bytes padding
     savedpc: *const u32, // u.l.savedpc (Instruction *)
     trap: i32,           // u.l.trap (l_signalT = sig_atomic_t)
     nextraargs: c_int,   // u.l.nextraargs
-                         // u2 union follows but we don't need it
+    _u_pad: [u8; 8],     // C-function branch is 24B; pad to match
+    // union u2: 4 bytes (funcidx / nyield / nres / transferinfo)
+    _u2: u32,
 }
 
 /// Mirror of `ffi::lua_Debug` with `i_ci` exposed as public.
@@ -171,6 +178,12 @@ struct LuaDebugExt {
     pub short_src: [std::os::raw::c_char; 60], // LUA_IDSIZE = 60
     pub i_ci: *mut std::ffi::c_void,
 }
+
+// Compile-time check: LuaDebugExt must have the same layout as ffi::lua_Debug.
+const _: () = assert!(
+    std::mem::size_of::<LuaDebugExt>() == std::mem::size_of::<ffi::lua_Debug>(),
+    "LuaDebugExt size must match ffi::lua_Debug"
+);
 
 /// Recover the real name for a `(temporary)` local variable slot.
 ///
@@ -811,8 +824,6 @@ mod tests {
 
         let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hit_clone = hit_count.clone();
-        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let diag_clone = diag.clone();
         let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let collected_clone = collected.clone();
 
@@ -822,58 +833,14 @@ mod tests {
                 if n == 1 {
                     // 2nd hit on line 2 = FORLOOP instruction
                     let state = lua.exec_raw_lua(|raw| raw.state());
-                    let mut d = String::new();
-
                     for level in 0..5 {
                         // SAFETY: In hook callback on VM thread.
                         let locals = unsafe { get_locals(state, level) };
-                        d.push_str(&format!(
-                            "level={level} locals={:?}\n",
-                            locals
-                                .iter()
-                                .map(|v| format!("{}={}", v.name, v.value))
-                                .collect::<Vec<_>>()
-                        ));
                         if locals.iter().any(|v| v.name == "sum") {
                             *collected_clone.lock().unwrap() = locals;
                             break;
                         }
                     }
-
-                    // Also dump raw lua_getlocal results at each slot
-                    for level in 0..5 {
-                        unsafe {
-                            let mut ar: ffi::lua_Debug = std::mem::zeroed();
-                            if ffi::lua_getstack(state, level, &mut ar) == 0 {
-                                continue;
-                            }
-                            let check = ffi::lua_getlocal(state, &ar, 1);
-                            if check.is_null() {
-                                continue;
-                            }
-                            let cname = CStr::from_ptr(check).to_string_lossy().into_owned();
-                            ffi::lua_pop(state, 1);
-                            if cname != "sum" {
-                                continue;
-                            }
-
-                            d.push_str(&format!("raw slots at level={level}:\n"));
-                            for slot in 1..=10 {
-                                let name_ptr = ffi::lua_getlocal(state, &ar, slot);
-                                if name_ptr.is_null() {
-                                    d.push_str(&format!("  slot {slot}: NULL\n"));
-                                    break;
-                                }
-                                let sname = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
-                                let val = stack_top_to_display(state);
-                                ffi::lua_pop(state, 1);
-                                d.push_str(&format!("  slot {slot}: name={sname:?} val={val}\n"));
-                            }
-                            break;
-                        }
-                    }
-
-                    *diag_clone.lock().unwrap() = d;
                 }
             }
             Ok(mlua::VmState::Continue)
@@ -885,18 +852,7 @@ mod tests {
             .exec()
             .unwrap();
 
-        let d = diag.lock().unwrap();
-        eprintln!("=== DIAG ===\n{d}");
-
         let locals = collected.lock().unwrap();
-        eprintln!(
-            "=== COLLECTED ===\n{:?}",
-            locals
-                .iter()
-                .map(|v| format!("{}={}", v.name, v.value))
-                .collect::<Vec<_>>()
-        );
-
         assert!(
             locals.iter().any(|v| v.name == "i"),
             "get_locals should recover for-loop variable 'i', got: {:?}",
@@ -938,10 +894,6 @@ mod tests {
             .unwrap();
 
         let r = results.lock().unwrap();
-        eprintln!("=== CONDITION RESULTS ===");
-        for (n, cond, val) in r.iter() {
-            eprintln!("  hit={n} cond(i==3)={cond} eval(i)={val:?}");
-        }
 
         // At hit n=3 (i=3), the condition should be true
         assert!(
@@ -962,8 +914,6 @@ mod tests {
 
         let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hit_clone = hit_count.clone();
-        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let diag_clone = diag.clone();
         let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let collected_clone = collected.clone();
 
@@ -972,25 +922,14 @@ mod tests {
                 let n = hit_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if n == 1 {
                     // Call get_locals INSIDE exec_raw_lua (MCP path)
-                    let mut d = String::new();
-
                     for level in 0..5i32 {
                         let locals =
                             lua.exec_raw_lua(|raw| unsafe { get_locals(raw.state(), level) });
-                        d.push_str(&format!(
-                            "level={level} locals={:?}\n",
-                            locals
-                                .iter()
-                                .map(|v| format!("{}={}", v.name, v.value))
-                                .collect::<Vec<_>>()
-                        ));
                         if locals.iter().any(|v| v.name == "sum") {
                             *collected_clone.lock().unwrap() = locals;
                             break;
                         }
                     }
-
-                    *diag_clone.lock().unwrap() = d;
                 }
             }
             Ok(mlua::VmState::Continue)
@@ -1002,18 +941,7 @@ mod tests {
             .exec()
             .unwrap();
 
-        let d = diag.lock().unwrap();
-        eprintln!("=== INSIDE exec_raw_lua ===\n{d}");
-
         let locals = collected.lock().unwrap();
-        eprintln!(
-            "=== COLLECTED ===\n{:?}",
-            locals
-                .iter()
-                .map(|v| format!("{}={}", v.name, v.value))
-                .collect::<Vec<_>>()
-        );
-
         assert!(
             locals.iter().any(|v| v.name == "i"),
             "get_locals inside exec_raw_lua should recover 'i', got: {:?}",
