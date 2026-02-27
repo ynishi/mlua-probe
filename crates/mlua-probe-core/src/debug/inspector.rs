@@ -97,57 +97,59 @@ pub(crate) fn inspect_upvalues(lua: &Lua, frame_id: usize) -> Vec<Variable> {
 
 /// Evaluate a Lua expression and return its string representation.
 ///
-/// # Current limitation (Phase 1)
+/// # Frame-scoped evaluation (DAP-compliant)
 ///
-/// `frame_id` is accepted but **not yet used** — evaluation always runs
-/// in the global scope.  This means local variables and upvalues of the
-/// paused frame are **not** accessible in the expression.
+/// When `frame_id` is `Some`, the expression is evaluated in the scope
+/// of the specified stack frame.  Locals, upvalues, and globals are all
+/// accessible, with Lua's standard resolution order:
 ///
-/// # Phase 2: frame-scoped evaluation (DAP-compliant)
+/// 1. **Locals** (highest priority)
+/// 2. **Upvalues**
+/// 3. **Globals** (via `__index` fallback)
 ///
-/// The [DAP specification][dap-eval] requires:
+/// This is implemented by building a custom environment table with
+/// locals + upvalues and a `{ __index = _G }` metatable, then setting
+/// it as the compiled chunk's `_ENV` via `lua_setupvalue`.
 ///
-/// > *"Evaluate the expression in the scope of this stack frame.
-/// > If not specified, the expression is evaluated in the global scope."*
+/// When `frame_id` is `None`, the expression is evaluated in the
+/// global scope only.
 ///
-/// The standard Lua technique (see [debugger.lua][dbg-lua]) is:
+/// # Expression-only
 ///
-/// 1. Collect locals via `lua_getlocal` and upvalues via
-///    `lua_getupvalue` for the target frame.
-/// 2. Build an environment table keyed by variable name, with an
-///    `__index` metamethod falling back to `_ENV` (globals).
-/// 3. Compile the expression with `load()` and set the env table.
-/// 4. Execute and return the result.
-///
-/// This keeps the evaluation non-invasive — read-only access to the
-/// frame's scope without modifying the Lua state.
+/// Statement execution (assignments, loops, etc.) is intentionally
+/// rejected to prevent side effects.  The expression is compiled as
+/// `return <expr>` to enforce this.
 ///
 /// [dap-eval]: https://microsoft.github.io/debug-adapter-protocol/specification#Requests_Evaluate
-/// [dbg-lua]: https://www.slembcke.net/blog/DebuggerLua/
 pub(crate) fn evaluate_expression(
     lua: &Lua,
     expression: &str,
-    _frame_id: Option<usize>,
+    frame_id: Option<usize>,
 ) -> Result<String, String> {
-    // TODO(Phase 2): When frame_id is Some, build a locals+upvalues
-    // environment table and pass it to `load()` as the chunk's env.
-
-    // Expression-only evaluation: compile as "return <expr>".
-    // `into_function` compiles without executing, separating syntax
-    // errors from runtime errors.
-    //
-    // Statement execution (assignments, loops, etc.) is intentionally
-    // rejected to prevent side effects.  DAP-compliant statement
-    // evaluation gated behind `context: "repl"` is planned for Phase 2.
     let expr_code = format!("return {expression}");
-    let func = lua
-        .load(&expr_code)
-        .into_function()
-        .map_err(|e| format!("syntax error: {e}"))?;
 
-    match func.call::<LuaValue>(()) {
-        Ok(val) => Ok(lua_value_to_display(&val)),
-        Err(e) => Err(e.to_string()),
+    match frame_id {
+        Some(fid) => {
+            let level = c_int::try_from(fid).map_err(|_| format!("frame_id {fid} out of range"))?;
+            // SAFETY: Called from the paused loop on the VM thread.
+            // exec_raw_lua holds mlua's internal lock, ensuring exclusive
+            // access to the lua_State for the duration of the FFI call.
+            lua.exec_raw_lua(|raw| unsafe {
+                ffi::evaluate_with_frame_env(raw.state(), &expr_code, level)
+            })
+        }
+        None => {
+            // Global scope evaluation.
+            let func = lua
+                .load(&expr_code)
+                .into_function()
+                .map_err(|e| format!("syntax error: {e}"))?;
+
+            match func.call::<LuaValue>(()) {
+                Ok(val) => Ok(lua_value_to_display(&val)),
+                Err(e) => Err(e.to_string()),
+            }
+        }
     }
 }
 

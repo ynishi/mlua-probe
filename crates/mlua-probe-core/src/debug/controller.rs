@@ -255,9 +255,10 @@ impl DebugController {
 
     /// Evaluate a Lua expression while paused.
     ///
-    /// **Phase 1 limitation:** `frame_id` is accepted but ignored —
-    /// evaluation runs in the global scope only.  Frame-scoped
-    /// evaluation (locals + upvalues as env) is planned for Phase 2.
+    /// When `frame_id` is `Some`, the expression is evaluated in the
+    /// scope of that stack frame — locals, upvalues, and globals are
+    /// all accessible.  When `None`, evaluation runs in the global
+    /// scope only.
     pub fn evaluate(
         &self,
         expression: &str,

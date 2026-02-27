@@ -757,3 +757,153 @@ fn completion_notifier_propagates_result() {
     assert!(matches!(ctrl.state(), SessionState::Terminated));
     handle.join().unwrap();
 }
+
+// ──────────────────────────────────────────────
+// 17. Frame-scoped expression evaluation (locals)
+// ──────────────────────────────────────────────
+
+/// Verifies that `evaluate` with a `frame_id` can access local
+/// variables of the paused frame.
+#[test]
+fn evaluate_expression_in_frame_scope() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local x = 10
+local y = 20
+local z = x + y
+return z
+"#;
+
+    // BP on line 4 (local z = x + y) — x=10, y=20 are in scope.
+    ctrl.set_breakpoint("@frame_eval.lua", 4, None).unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@frame_eval.lua");
+
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should hit breakpoint");
+    let stack = match &evt {
+        DebugEvent::Paused { stack, .. } => stack,
+        other => panic!("expected Paused, got: {other:?}"),
+    };
+
+    let frame = stack
+        .iter()
+        .find(|f| f.source.contains("frame_eval.lua"))
+        .expect("stack should contain frame_eval.lua frame");
+
+    // Evaluate expression referencing local variables.
+    let result = ctrl.evaluate("x + y", Some(frame.id)).unwrap();
+    assert_eq!(result, "30", "x(10) + y(20) should be 30");
+
+    // Single local variable.
+    let result = ctrl.evaluate("x * 2", Some(frame.id)).unwrap();
+    assert_eq!(result, "20", "x(10) * 2 should be 20");
+
+    // Global function accessible through __index fallback.
+    let result = ctrl.evaluate("type(x)", Some(frame.id)).unwrap();
+    assert_eq!(result, "\"number\"", "type(x) should be 'number'");
+
+    // Global scope should NOT see locals (nil + nil → runtime error).
+    let err = ctrl.evaluate("x + y", None);
+    assert!(err.is_err(), "global scope should not see local variables");
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 18. Frame-scoped evaluation with upvalues
+// ──────────────────────────────────────────────
+
+/// Verifies that frame-scoped evaluation can access both locals and
+/// upvalues (captured variables from enclosing scopes).
+#[test]
+fn evaluate_expression_with_upvalues_in_frame() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local captured = 42
+local function inner()
+    local x = 1
+    local y = captured + x
+end
+inner()
+"#;
+
+    // BP on line 5 (local y = captured + x), inside inner().
+    ctrl.set_breakpoint("@upval_eval.lua", 5, None).unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@upval_eval.lua");
+
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should hit breakpoint");
+    let stack = match &evt {
+        DebugEvent::Paused { stack, .. } => stack,
+        other => panic!("expected Paused, got: {other:?}"),
+    };
+
+    let frame = stack
+        .iter()
+        .find(|f| f.name == "inner")
+        .expect("stack should contain inner() frame");
+
+    // Upvalue + local combined.
+    let result = ctrl.evaluate("captured + x", Some(frame.id)).unwrap();
+    assert_eq!(result, "43", "captured(42) + x(1) should be 43");
+
+    // Upvalue alone.
+    let result = ctrl.evaluate("captured", Some(frame.id)).unwrap();
+    assert_eq!(result, "42", "captured should be 42");
+
+    // Global function via __index.
+    let result = ctrl.evaluate("type(captured)", Some(frame.id)).unwrap();
+    assert_eq!(result, "\"number\"", "type(captured) should be 'number'");
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+// ──────────────────────────────────────────────
+// 19. Local shadows upvalue in frame-scoped eval
+// ──────────────────────────────────────────────
+
+/// Verifies that a local variable shadows an upvalue of the same name
+/// in frame-scoped evaluation, matching Lua's scoping rules.
+#[test]
+fn evaluate_local_shadows_upvalue() {
+    let lua = Arc::new(Lua::new());
+    let (session, ctrl) = DebugSession::new();
+    session.attach(&lua).unwrap();
+
+    let code = r#"
+local x = 100
+local function inner()
+    local x = 1
+    local y = x + 1
+end
+inner()
+"#;
+
+    // BP on line 5 (local y = x + 1) — local x=1 shadows upvalue x=100.
+    ctrl.set_breakpoint("@shadow.lua", 5, None).unwrap();
+    let handle = spawn_lua(lua.clone(), code, "@shadow.lua");
+
+    let evt = wait_event_timeout(&ctrl, Duration::from_secs(5)).expect("should hit breakpoint");
+    let stack = match &evt {
+        DebugEvent::Paused { stack, .. } => stack,
+        other => panic!("expected Paused, got: {other:?}"),
+    };
+
+    let frame = stack
+        .iter()
+        .find(|f| f.name == "inner")
+        .expect("stack should contain inner() frame");
+
+    // The local x=1 should shadow the upvalue x=100.
+    let result = ctrl.evaluate("x", Some(frame.id)).unwrap();
+    assert_eq!(result, "1", "local x should shadow upvalue x");
+
+    ctrl.continue_execution().unwrap();
+    handle.join().unwrap().unwrap();
+}

@@ -138,6 +138,58 @@ pub(crate) unsafe fn get_upvalues(state: *mut ffi::lua_State, level: c_int) -> V
     vars
 }
 
+/// Convert the value at the top of the Lua stack to a display string.
+///
+/// Does **not** pop the value.
+///
+/// # Safety
+///
+/// The Lua stack must have at least one element.
+unsafe fn stack_top_to_display(state: *mut ffi::lua_State) -> String {
+    unsafe {
+        let type_id = ffi::lua_type(state, -1);
+        match type_id {
+            ffi::LUA_TNIL => "nil".to_string(),
+            ffi::LUA_TBOOLEAN => if ffi::lua_toboolean(state, -1) != 0 {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            ffi::LUA_TNUMBER => {
+                if ffi::lua_isinteger(state, -1) != 0 {
+                    format!("{}", ffi::lua_tointeger(state, -1))
+                } else {
+                    format!("{}", ffi::lua_tonumber(state, -1))
+                }
+            }
+            ffi::LUA_TSTRING => {
+                let mut len: usize = 0;
+                let ptr = ffi::lua_tolstring(state, -1, &mut len);
+                if ptr.is_null() {
+                    "\"\"".to_string()
+                } else {
+                    let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+                    format!("\"{}\"", String::from_utf8_lossy(bytes))
+                }
+            }
+            ffi::LUA_TTABLE => {
+                let raw_len = ffi::lua_rawlen(state, -1);
+                format!("table (len={raw_len})")
+            }
+            ffi::LUA_TFUNCTION => "function".to_string(),
+            ffi::LUA_TUSERDATA => "userdata".to_string(),
+            ffi::LUA_TTHREAD => "thread".to_string(),
+            ffi::LUA_TLIGHTUSERDATA => "lightuserdata".to_string(),
+            _ => {
+                let type_name_ptr = ffi::lua_typename(state, type_id);
+                let type_name = CStr::from_ptr(type_name_ptr).to_string_lossy();
+                format!("<{type_name}>")
+            }
+        }
+    }
+}
+
 /// Read the value at the top of the Lua stack and convert it to a
 /// [`Variable`].  Does **not** pop the value.
 ///
@@ -149,41 +201,7 @@ unsafe fn read_stack_top(state: *mut ffi::lua_State, name: &str) -> Variable {
     let type_name_ptr = ffi::lua_typename(state, type_id);
     let type_name = CStr::from_ptr(type_name_ptr).to_string_lossy().into_owned();
 
-    let value = match type_id {
-        ffi::LUA_TNIL => "nil".to_string(),
-        ffi::LUA_TBOOLEAN => if ffi::lua_toboolean(state, -1) != 0 {
-            "true"
-        } else {
-            "false"
-        }
-        .to_string(),
-        ffi::LUA_TNUMBER => {
-            if ffi::lua_isinteger(state, -1) != 0 {
-                format!("{}", ffi::lua_tointeger(state, -1))
-            } else {
-                format!("{}", ffi::lua_tonumber(state, -1))
-            }
-        }
-        ffi::LUA_TSTRING => {
-            let mut len: usize = 0;
-            let ptr = ffi::lua_tolstring(state, -1, &mut len);
-            if ptr.is_null() {
-                "\"\"".to_string()
-            } else {
-                let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-                format!("\"{}\"", String::from_utf8_lossy(bytes))
-            }
-        }
-        ffi::LUA_TTABLE => {
-            let raw_len = ffi::lua_rawlen(state, -1);
-            format!("table (len={raw_len})")
-        }
-        ffi::LUA_TFUNCTION => "function".to_string(),
-        ffi::LUA_TUSERDATA => "userdata".to_string(),
-        ffi::LUA_TTHREAD => "thread".to_string(),
-        ffi::LUA_TLIGHTUSERDATA => "lightuserdata".to_string(),
-        _ => format!("<{type_name}>"),
-    };
+    let value = stack_top_to_display(state);
 
     Variable {
         name: name.to_string(),
@@ -191,6 +209,182 @@ unsafe fn read_stack_top(state: *mut ffi::lua_State, name: &str) -> Variable {
         type_name,
         // TODO: Phase 2 — issue a real VariableRef for table lazy expansion.
         children_ref: None,
+    }
+}
+
+// ─── Frame-scoped evaluation (Phase 2) ──────────────
+
+/// Build an environment table for frame-scoped expression evaluation.
+///
+/// Creates a table containing all locals and upvalues at the given
+/// stack `level`, with a metatable `{ __index = _G }` so that global
+/// variables remain accessible.
+///
+/// Locals are set **after** upvalues so they take priority, matching
+/// Lua's scoping rules.
+///
+/// # Stack effect
+///
+/// Pushes **one** table (the environment) onto the stack.
+///
+/// # Safety
+///
+/// Same contract as [`get_locals`].
+unsafe fn build_frame_env(state: *mut ffi::lua_State, level: c_int) {
+    unsafe {
+        ffi::lua_createtable(state, 0, 16);
+        let env_idx = ffi::lua_gettop(state);
+
+        let mut ar: ffi::lua_Debug = std::mem::zeroed();
+        if ffi::lua_getstack(state, level, &mut ar) != 0 {
+            // ── Upvalues first (locals will override) ──
+            if ffi::lua_getinfo(state, c"f".as_ptr(), &mut ar) != 0 {
+                let func_idx = ffi::lua_gettop(state);
+                let mut n: c_int = 1;
+                loop {
+                    let name_ptr = ffi::lua_getupvalue(state, func_idx, n);
+                    if name_ptr.is_null() {
+                        break;
+                    }
+                    // lua_getupvalue pushed the value; setfield pops it.
+                    ffi::lua_setfield(state, env_idx, name_ptr);
+                    n = match n.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+                ffi::lua_pop(state, 1); // pop the function
+            }
+
+            // ── Locals override upvalues ──
+            let mut ar2: ffi::lua_Debug = std::mem::zeroed();
+            if ffi::lua_getstack(state, level, &mut ar2) != 0 {
+                let mut n: c_int = 1;
+                loop {
+                    let name_ptr = ffi::lua_getlocal(state, &ar2, n);
+                    if name_ptr.is_null() {
+                        break;
+                    }
+                    let name = CStr::from_ptr(name_ptr);
+                    if name.to_bytes().starts_with(b"(") {
+                        // Internal variable (e.g. "(for state)") — skip.
+                        ffi::lua_pop(state, 1);
+                    } else {
+                        ffi::lua_setfield(state, env_idx, name_ptr);
+                    }
+                    n = match n.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+            }
+        }
+
+        // ── Metatable: { __index = <globals> } ──
+        ffi::lua_createtable(state, 0, 1);
+        ffi::lua_rawgeti(state, ffi::LUA_REGISTRYINDEX, ffi::LUA_RIDX_GLOBALS);
+        ffi::lua_setfield(state, -2, c"__index".as_ptr());
+        ffi::lua_setmetatable(state, env_idx);
+
+        debug_assert_eq!(
+            ffi::lua_gettop(state),
+            env_idx,
+            "stack imbalance in build_frame_env"
+        );
+    }
+}
+
+/// Evaluate a Lua expression in the scope of a specific stack frame.
+///
+/// Builds a locals+upvalues environment (via [`build_frame_env`]),
+/// sets it as the chunk's `_ENV`, compiles and executes the expression.
+///
+/// In Lua 5.4, the first upvalue of a compiled chunk is always `_ENV`.
+/// [`lua_setupvalue`](ffi::lua_setupvalue) replaces it with our custom
+/// env table, so all name lookups in the expression go through:
+///
+/// 1. Locals (highest priority)
+/// 2. Upvalues
+/// 3. Globals (via `__index` metamethod)
+///
+/// # Stack effect
+///
+/// Net zero — all pushed values are cleaned up.
+///
+/// # Safety
+///
+/// Same contract as [`get_locals`].
+pub(crate) unsafe fn evaluate_with_frame_env(
+    state: *mut ffi::lua_State,
+    code: &str,
+    level: c_int,
+) -> Result<String, String> {
+    unsafe {
+        let top = ffi::lua_gettop(state);
+
+        // 1. Build env table (pushes 1 value).
+        build_frame_env(state, level);
+        let env_idx = ffi::lua_gettop(state);
+
+        // 2. Compile expression.
+        let ret = ffi::luaL_loadbufferx(
+            state,
+            code.as_ptr().cast(),
+            code.len(),
+            c"=eval".as_ptr(),
+            std::ptr::null(),
+        );
+        if ret != ffi::LUA_OK {
+            let err = stack_top_to_error(state);
+            ffi::lua_settop(state, top);
+            return Err(format!("syntax error: {err}"));
+        }
+        // Stack: ... env func
+        let func_idx = ffi::lua_gettop(state);
+
+        // 3. Set _ENV as the first upvalue of the compiled chunk.
+        ffi::lua_pushvalue(state, env_idx);
+        let upname = ffi::lua_setupvalue(state, func_idx, 1);
+        if upname.is_null() {
+            // lua_setupvalue failed — clean up.
+            ffi::lua_settop(state, top);
+            return Err("failed to set chunk environment".to_string());
+        }
+        // lua_setupvalue consumed the pushed value.
+        // Stack: ... env func
+
+        // 4. Execute (0 args, 1 result).
+        let call_ret = ffi::lua_pcallk(state, 0, 1, 0, 0, None);
+        // Stack: ... env result_or_error
+
+        if call_ret != ffi::LUA_OK {
+            let err = stack_top_to_error(state);
+            ffi::lua_settop(state, top);
+            return Err(err);
+        }
+
+        // 5. Read result.
+        let result = stack_top_to_display(state);
+        ffi::lua_settop(state, top);
+        Ok(result)
+    }
+}
+
+/// Read the value at the top of the stack as an error string.
+///
+/// # Safety
+///
+/// The Lua stack must have at least one element.
+unsafe fn stack_top_to_error(state: *mut ffi::lua_State) -> String {
+    unsafe {
+        let mut len: usize = 0;
+        let ptr = ffi::lua_tolstring(state, -1, &mut len);
+        if ptr.is_null() {
+            "unknown error".to_string()
+        } else {
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+            String::from_utf8_lossy(bytes).into_owned()
+        }
     }
 }
 

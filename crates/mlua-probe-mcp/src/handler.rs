@@ -455,8 +455,9 @@ impl DebugMcpHandler {
     }
 
     /// Evaluate a Lua expression while paused. Returns the result as
-    /// a string. Note: currently evaluates in global scope only
-    /// (frame-scoped evaluation is planned).
+    /// a string. When `frame_id` is provided, locals and upvalues of
+    /// that stack frame are accessible in the expression. When omitted,
+    /// evaluation runs in the global scope.
     #[tool(name = "evaluate")]
     async fn evaluate(
         &self,
