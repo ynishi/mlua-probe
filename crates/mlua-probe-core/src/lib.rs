@@ -1,11 +1,17 @@
-//! Core debug engine for mlua.
+//! Core debug and testing engine for mlua.
 //!
-//! Provides breakpoints, stepping, variable inspection, and expression
-//! evaluation for Lua code running inside an mlua `Lua` instance.
+//! Provides two main capabilities for Lua code running inside an
+//! mlua `Lua` instance:
+//!
+//! - **Debugging** — breakpoints, stepping, variable inspection, and
+//!   expression evaluation via [`DebugSession`] / [`DebugController`].
+//! - **Testing** — a built-in [lust](https://github.com/bjornbytes/lust)-based
+//!   test framework with structured result collection via the
+//!   [`testing`] module.
 //!
 //! # Architecture
 //!
-//! The engine uses a **VM-thread blocking** model:
+//! The debug engine uses a **VM-thread blocking** model:
 //!
 //! - A Lua debug hook pauses the VM thread when a breakpoint or step
 //!   condition is met.
@@ -15,7 +21,10 @@
 //! - A resume command (continue / step) unblocks the hook and lets
 //!   Lua execution proceed.
 //!
-//! # Usage
+//! The testing module is independent of the debug engine.  It creates
+//! a fresh Lua VM per test run, so tests are fully isolated.
+//!
+//! # Debugging example
 //!
 //! ```rust,no_run
 //! use mlua::prelude::*;
@@ -48,8 +57,27 @@
 //! let result = handle.join().unwrap().unwrap();
 //! assert_eq!(result, 3);
 //! ```
+//!
+//! # Testing example
+//!
+//! ```rust
+//! use mlua_probe_core::testing;
+//!
+//! let summary = testing::framework::run_tests(r#"
+//!     local describe, it, expect = lust.describe, lust.it, lust.expect
+//!     describe('math', function()
+//!         it('adds', function()
+//!             expect(1 + 1).to.equal(2)
+//!         end)
+//!     end)
+//! "#, "@test.lua").unwrap();
+//!
+//! assert_eq!(summary.passed, 1);
+//! assert_eq!(summary.failed, 0);
+//! ```
 
 mod debug;
+pub mod testing;
 
 pub use debug::breakpoint::Breakpoint;
 pub use debug::controller::DebugController;

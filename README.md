@@ -1,6 +1,6 @@
 # mlua-probe
 
-Lua debugger for [mlua](https://github.com/khvzak/mlua) — breakpoints, stepping, variable inspection, and expression evaluation.
+Lua debugger and test runner for [mlua](https://github.com/khvzak/mlua) — breakpoints, stepping, variable inspection, expression evaluation, and a built-in test framework.
 
 Designed for programmatic access: attach to a running `mlua::Lua` instance and control it from any frontend (MCP server, DAP adapter, etc.).
 
@@ -8,7 +8,7 @@ Designed for programmatic access: attach to a running `mlua::Lua` instance and c
 
 | Crate | Description |
 |-------|-------------|
-| `mlua-probe-core` | Core debug engine (breakpoints, stepping, inspector) |
+| `mlua-probe-core` | Core debug engine and test framework |
 | `mlua-probe-mcp` | MCP server binary (stdio transport) |
 
 ## Architecture
@@ -101,6 +101,23 @@ Add to your MCP client configuration:
 | `evaluate` | Evaluate a Lua expression |
 | `get_state` | Get session state |
 | `disconnect` | End debug session |
+| **Testing** | |
+| `test_launch` | Run Lua tests with the lust framework and return structured results |
+
+### Testing
+
+The `test_launch` tool runs Lua test code with the [lust](https://github.com/bjornbytes/lust) framework pre-loaded and returns structured JSON results (passed/failed counts and per-test details).
+
+```lua
+local describe, it, expect = lust.describe, lust.it, lust.expect
+describe('math', function()
+    it('adds numbers', function()
+        expect(1 + 1).to.equal(2)
+    end)
+end)
+```
+
+The testing module is independent of the debug session. To debug a failing test, pass the same Lua code to `debug_launch` — breakpoints and stepping work inside test code as usual.
 
 ## Requirements
 

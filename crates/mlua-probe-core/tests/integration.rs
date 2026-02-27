@@ -284,11 +284,11 @@ outer()
     // The stack should contain function names "inner" and "outer"
     let names: Vec<&str> = stack.iter().map(|f| f.name.as_str()).collect();
     assert!(
-        names.iter().any(|n| *n == "inner"),
+        names.contains(&"inner"),
         "stack should contain 'inner', got: {names:?}"
     );
     assert!(
-        names.iter().any(|n| *n == "outer"),
+        names.contains(&"outer"),
         "stack should contain 'outer', got: {names:?}"
     );
 

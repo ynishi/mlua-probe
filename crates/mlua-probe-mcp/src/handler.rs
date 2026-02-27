@@ -3,8 +3,8 @@ use std::thread;
 
 use mlua::prelude::*;
 use mlua_probe_core::{
-    BreakpointId, DebugController, DebugEvent, DebugSession, PauseReason, SessionState, StackFrame,
-    Variable,
+    testing, BreakpointId, DebugController, DebugEvent, DebugSession, PauseReason, SessionState,
+    StackFrame, Variable,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -57,6 +57,15 @@ pub struct EvaluateParams {
     pub expression: String,
     /// Stack frame for evaluation context (None = global scope).
     pub frame_id: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TestLaunchParams {
+    /// Lua test code using the lust framework (describe/it/expect).
+    /// The `lust` global is pre-loaded automatically.
+    pub code: String,
+    /// Chunk name for error messages (default: "@test.lua").
+    pub chunk_name: Option<String>,
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────
@@ -474,6 +483,61 @@ impl DebugMcpHandler {
             Err(e) => Err(format!("Evaluation failed: {e}")),
         }
     }
+
+    // ── Testing ─────────────────────────────────────────────────
+
+    /// Run Lua test code with the lust test framework pre-loaded.
+    /// Returns structured test results (passed/failed counts and
+    /// per-test details).
+    ///
+    /// The `lust` global is available automatically. Use describe/it/expect:
+    /// ```lua
+    /// local describe, it, expect = lust.describe, lust.it, lust.expect
+    /// describe('math', function()
+    ///   it('adds numbers', function()
+    ///     expect(1 + 1).to.equal(2)
+    ///   end)
+    /// end)
+    /// ```
+    #[tool(name = "test_launch")]
+    async fn test_launch(
+        &self,
+        Parameters(params): Parameters<TestLaunchParams>,
+    ) -> Result<String, String> {
+        let code = params.code;
+        let chunk_name = params.chunk_name.unwrap_or_else(|| "@test.lua".to_string());
+
+        let result =
+            tokio::task::spawn_blocking(move || testing::framework::run_tests(&code, &chunk_name))
+                .await
+                .map_err(|e| format!("Internal error: {e}"))?;
+
+        match result {
+            Ok(summary) => {
+                let tests: Vec<serde_json::Value> = summary
+                    .tests
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "suite": t.suite,
+                            "name": t.name,
+                            "passed": t.passed,
+                            "error": t.error,
+                        })
+                    })
+                    .collect();
+
+                Ok(json!({
+                    "passed": summary.passed,
+                    "failed": summary.failed,
+                    "total": summary.total,
+                    "tests": tests,
+                })
+                .to_string())
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[tool_handler]
@@ -481,12 +545,14 @@ impl ServerHandler for DebugMcpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Lua debugger (mlua-probe) for environments without DAP support. \
-                 Provides breakpoints, stepping, variable inspection, and expression \
-                 evaluation for Lua code running in an mlua VM.\n\n\
-                 Start with debug_launch, then use wait_event to receive pause events.\n\n\
-                 SECURITY: debug_launch and evaluate execute arbitrary Lua code with \
-                 full standard library access (including os and io modules). \
+                "Lua debugger and test runner (mlua-probe) for environments without DAP support. \
+                 Provides breakpoints, stepping, variable inspection, expression \
+                 evaluation, and a built-in test framework for Lua code running in an mlua VM.\n\n\
+                 Debugging: Start with debug_launch, then use wait_event to receive pause events.\n\n\
+                 Testing: Use test_launch to run Lua tests with the lust framework \
+                 (describe/it/expect/spy). Returns structured JSON results.\n\n\
+                 SECURITY: debug_launch, evaluate, and test_launch execute arbitrary Lua code \
+                 with full standard library access (including os and io modules). \
                  Only use with trusted input."
                     .into(),
             ),
