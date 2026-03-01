@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
@@ -19,8 +20,13 @@ use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LaunchParams {
-    /// Lua source code to execute.
-    pub code: String,
+    /// Lua source code to execute (inline). Provide either `code` or
+    /// `code_file`, not both.
+    pub code: Option<String>,
+    /// Path to a Lua source file to execute. Provide either `code` or
+    /// `code_file`, not both. When `chunk_name` is omitted, it is
+    /// derived from the filename (e.g. "script.lua" → "@script.lua").
+    pub code_file: Option<String>,
     /// Chunk name (default: "@main.lua"). Used to identify the source
     /// in breakpoints and stack traces.
     pub chunk_name: Option<String>,
@@ -63,9 +69,50 @@ pub struct EvaluateParams {
 pub struct TestLaunchParams {
     /// Lua test code using the mlua-lspec framework (describe/it/expect).
     /// The `lust` global is pre-loaded automatically.
-    pub code: String,
+    /// Provide either `code` or `code_file`, not both.
+    pub code: Option<String>,
+    /// Path to a Lua test file. Provide either `code` or `code_file`,
+    /// not both. When `chunk_name` is omitted, it is derived from the
+    /// filename.
+    pub code_file: Option<String>,
     /// Chunk name for error messages (default: "@test.lua").
     pub chunk_name: Option<String>,
+}
+
+// ─── Code source resolution ──────────────────────────────────────
+
+/// Resolved code source: the Lua source text and an inferred chunk name.
+struct ResolvedCode {
+    code: String,
+    inferred_chunk_name: Option<String>,
+}
+
+/// Resolve Lua source from either inline `code` or a `code_file` path.
+///
+/// Exactly one of the two must be provided.  When `code_file` is used,
+/// the chunk name is inferred from the filename (e.g. `"script.lua"` →
+/// `"@script.lua"`).
+fn resolve_code(code: Option<String>, code_file: Option<String>) -> Result<ResolvedCode, String> {
+    match (code, code_file) {
+        (Some(c), None) => Ok(ResolvedCode {
+            code: c,
+            inferred_chunk_name: None,
+        }),
+        (None, Some(path)) => {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read {path}: {e}"))?;
+            let file_name = Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file.lua");
+            Ok(ResolvedCode {
+                code: content,
+                inferred_chunk_name: Some(format!("@{file_name}")),
+            })
+        }
+        (Some(_), Some(_)) => Err("Provide either `code` or `code_file`, not both.".to_string()),
+        (None, None) => Err("Either `code` or `code_file` must be provided.".to_string()),
+    }
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────
@@ -212,9 +259,13 @@ impl DebugMcpHandler {
             return Err("A debug session is already active. Call disconnect first.".to_string());
         }
 
-        let chunk_name = params.chunk_name.unwrap_or_else(|| "@main.lua".to_string());
+        let resolved = resolve_code(params.code, params.code_file)?;
+        let chunk_name = params
+            .chunk_name
+            .or(resolved.inferred_chunk_name)
+            .unwrap_or_else(|| "@main.lua".to_string());
         let stop_on_entry = params.stop_on_entry.unwrap_or(true);
-        let code = params.code;
+        let code = resolved.code;
 
         let lua = Arc::new(Lua::new());
         let (session, controller) = DebugSession::new();
@@ -504,8 +555,12 @@ impl DebugMcpHandler {
         &self,
         Parameters(params): Parameters<TestLaunchParams>,
     ) -> Result<String, String> {
-        let code = params.code;
-        let chunk_name = params.chunk_name.unwrap_or_else(|| "@test.lua".to_string());
+        let resolved = resolve_code(params.code, params.code_file)?;
+        let code = resolved.code;
+        let chunk_name = params
+            .chunk_name
+            .or(resolved.inferred_chunk_name)
+            .unwrap_or_else(|| "@test.lua".to_string());
 
         let result =
             tokio::task::spawn_blocking(move || testing::framework::run_tests(&code, &chunk_name))
