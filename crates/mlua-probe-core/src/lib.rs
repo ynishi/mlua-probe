@@ -88,6 +88,19 @@ pub mod testing {
     pub use mlua_lspec::doubles;
 }
 
+/// Lua static checker, re-exported from [`mlua_check`].
+///
+/// Detects undefined variables, globals, and fields before execution.
+pub mod checking {
+    pub use mlua_check::{
+        Diagnostic, LintConfig, LintEngine, LintPolicy, LintResult, RuleId, Severity,
+    };
+
+    pub mod framework {
+        pub use mlua_check::{collect_symbols, lint, register, register_with_config, run_lint};
+    }
+}
+
 pub use debug::breakpoint::Breakpoint;
 pub use debug::controller::DebugController;
 pub use debug::engine::{CompletionNotifier, DebugSession};

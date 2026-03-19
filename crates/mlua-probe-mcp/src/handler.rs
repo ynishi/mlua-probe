@@ -4,8 +4,8 @@ use std::thread;
 
 use mlua::prelude::*;
 use mlua_probe_core::{
-    testing, BreakpointId, DebugController, DebugEvent, DebugSession, PauseReason, SessionState,
-    StackFrame, Variable,
+    checking, testing, BreakpointId, DebugController, DebugEvent, DebugSession, PauseReason,
+    SessionState, StackFrame, Variable,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -76,6 +76,19 @@ pub struct TestLaunchParams {
     /// filename.
     pub code_file: Option<String>,
     /// Chunk name for error messages (default: "@test.lua").
+    pub chunk_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CheckLaunchParams {
+    /// Lua source code to check (inline). Provide either `code` or
+    /// `code_file`, not both.
+    pub code: Option<String>,
+    /// Path to a Lua source file to check. Provide either `code` or
+    /// `code_file`, not both. When `chunk_name` is omitted, it is
+    /// derived from the filename.
+    pub code_file: Option<String>,
+    /// Chunk name for diagnostic messages (default: "@check.lua").
     pub chunk_name: Option<String>,
 }
 
@@ -593,6 +606,35 @@ impl DebugMcpHandler {
             Err(e) => Err(e),
         }
     }
+
+    /// Run Lua static analysis to detect undefined variables, globals,
+    /// and fields before execution. Returns structured diagnostics.
+    ///
+    /// Uses the standard Lua 5.4 symbol table. Custom globals are not
+    /// available — use this for basic safety checks on generated code.
+    #[tool(name = "check_launch")]
+    async fn check_launch(
+        &self,
+        Parameters(params): Parameters<CheckLaunchParams>,
+    ) -> Result<String, String> {
+        let resolved = resolve_code(params.code, params.code_file)?;
+        let code = resolved.code;
+        let chunk_name = params
+            .chunk_name
+            .or(resolved.inferred_chunk_name)
+            .unwrap_or_else(|| "@check.lua".to_string());
+
+        let result =
+            tokio::task::spawn_blocking(move || checking::framework::run_lint(&code, &chunk_name))
+                .await
+                .map_err(|e| format!("Internal error: {e}"))?;
+
+        match result {
+            Ok(lint_result) => Ok(serde_json::to_string(&lint_result)
+                .map_err(|e| format!("Serialization error: {e}"))?),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[tool_handler]
@@ -606,9 +648,12 @@ impl ServerHandler for DebugMcpHandler {
                  Debugging: Start with debug_launch, then use wait_event to receive pause events.\n\n\
                  Testing: Use test_launch to run Lua tests with the mlua-lspec framework \
                  (describe/it/expect/spy). Returns structured JSON results.\n\n\
+                 Checking: Use check_launch to run static analysis on Lua code before execution. \
+                 Detects undefined variables, globals, and fields. Returns structured diagnostics.\n\n\
                  SECURITY: debug_launch, evaluate, and test_launch execute arbitrary Lua code \
                  with full standard library access (including os and io modules). \
-                 Only use with trusted input."
+                 Only use with trusted input. check_launch creates a Lua VM for symbol \
+                 collection but does not execute the checked code."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

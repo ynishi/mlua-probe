@@ -16,3 +16,4 @@ categories = ["development-tools::debugging"]
 [workspace.dependencies]
 mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
 mlua-lspec = "0.1.0"
+mlua-check = "0.1.0"

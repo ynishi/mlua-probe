@@ -13,4 +13,5 @@ readme = "../../README.md"
 [dependencies]
 mlua = { workspace = true }
 mlua-lspec = { workspace = true }
+mlua-check = { workspace = true }
 thiserror = "2"
