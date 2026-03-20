@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "mlua-probe-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "mlua",
  "mlua-check",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "mlua-probe-mcp"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "mlua",
