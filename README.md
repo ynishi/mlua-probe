@@ -1,6 +1,6 @@
 # mlua-probe
 
-Lua debugger and test runner for [mlua](https://github.com/khvzak/mlua) — breakpoints, stepping, variable inspection, expression evaluation, and a built-in test framework.
+Lua debugger, test runner, and static analyzer for [mlua](https://github.com/khvzak/mlua) — breakpoints, stepping, variable inspection, expression evaluation, a built-in test framework, and lint-style code checking.
 
 Designed for programmatic access: attach to a running `mlua::Lua` instance and control it from any frontend (MCP server, DAP adapter, etc.).
 
@@ -8,8 +8,10 @@ Designed for programmatic access: attach to a running `mlua::Lua` instance and c
 
 | Crate | Description |
 |-------|-------------|
-| `mlua-probe-core` | Core debug engine and test framework |
+| `mlua-probe-core` | Core debug engine, test framework, and static checker |
 | `mlua-probe-mcp` | MCP server binary (stdio transport) |
+| [`mlua-lspec`](https://crates.io/crates/mlua-lspec) | Lua test framework for mlua (external dependency) |
+| [`mlua-check`](https://crates.io/crates/mlua-check) | Lua static analysis engine (external dependency) |
 
 ## Architecture
 
@@ -102,14 +104,16 @@ Add to your MCP client configuration:
 | `get_state` | Get session state |
 | `disconnect` | End debug session |
 | **Testing** | |
-| `test_launch` | Run Lua tests with the lust framework and return structured results |
+| `test_launch` | Run Lua tests with the mlua-lspec framework and return structured results |
+| **Checking** | |
+| `check_launch` | Run static analysis on Lua code and return structured diagnostics |
 
 ### Testing
 
-The `test_launch` tool runs Lua test code with the [lust](https://github.com/bjornbytes/lust) framework pre-loaded and returns structured JSON results (passed/failed counts and per-test details).
+The `test_launch` tool runs Lua test code with the [mlua-lspec](https://crates.io/crates/mlua-lspec) framework (describe/it/expect/spy) pre-loaded and returns structured JSON results (passed/failed counts and per-test details).
 
 ```lua
-local describe, it, expect = lust.describe, lust.it, lust.expect
+local describe, it, expect = lspec.describe, lspec.it, lspec.expect
 describe('math', function()
     it('adds numbers', function()
         expect(1 + 1).to.equal(2)
@@ -118,6 +122,17 @@ end)
 ```
 
 The testing module is independent of the debug session. To debug a failing test, pass the same Lua code to `debug_launch` — breakpoints and stepping work inside test code as usual.
+
+### Static analysis
+
+The `check_launch` tool runs [mlua-check](https://crates.io/crates/mlua-check) on Lua source code **without executing it**. It detects undefined variables, globals, and table fields, returning structured diagnostics (rule, severity, line, message).
+
+```lua
+-- check_launch will warn: undefined global 'unknown_func'
+unknown_func()
+```
+
+The checker uses the standard Lua 5.4 symbol table. For custom globals registered on a `mlua::Lua` instance, use the `checking::framework::register` API from Rust.
 
 ## Requirements
 
